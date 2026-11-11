@@ -104,3 +104,24 @@ def collect(token, health_id, session_id):
     if not token or not health_id or not session_id:
         raise CollectError(".env に NOTION_TOKEN と2つのデータソースIDを設定してください（README参照）")
     return parse_daily(query_all(health_id, token)), parse_sessions(query_all(session_id, token))
+
+
+def check():
+    """Notion に接続できるかだけを確かめる。件数と日付の範囲だけを表示し、記録の中身は出さない。"""
+    import sys
+    from .config import load_env
+    env = load_env()
+    try:
+        daily, sessions = collect(env.get("NOTION_TOKEN"), env.get("NOTION_HEALTH_DATA_SOURCE_ID"),
+                                  env.get("NOTION_SLEEP_SESSION_DATA_SOURCE_ID"))
+    except CollectError as error:
+        print(f"NG：{error}", file=sys.stderr)
+        return 1
+    days = sorted(daily)
+    span = f"{days[0]}〜{days[-1]}" if days else "なし"
+    print(f"OK：健康記録 {len(daily)}日分（{span}）、睡眠セッション {len(sessions)}件を読み取れました")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(check())
