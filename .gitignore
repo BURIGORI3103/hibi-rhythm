@@ -1,0 +1,10 @@
+# 個人データと秘密情報は公開リポジトリへ入れない
+.env
+data/
+dist/
+dist.tmp/
+.state/
+
+.venv/
+__pycache__/
+*.log

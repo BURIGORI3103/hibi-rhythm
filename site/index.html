@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="light dark">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'self'">
+<title>日々リズム</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<main id="gate" class="gate" hidden>
+  <form id="gate-form" class="gate-card" autocomplete="off">
+    <h1>日々リズム</h1>
+    <p class="gate-lead">睡眠とPC利用の記録です。共有された合言葉を入力してください。</p>
+    <label for="pass">合言葉</label>
+    <input id="pass" name="pass" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+    <label class="check"><input id="show-pass" type="checkbox"> 入力内容を表示する</label>
+    <label class="check"><input id="remember" type="checkbox"> この端末に合言葉を記憶する</label>
+    <p id="gate-error" class="gate-error" role="alert" hidden></p>
+    <button id="gate-submit" type="submit" class="primary">開く</button>
+  </form>
+</main>
+
+<main id="fatal" class="gate" hidden>
+  <div class="gate-card"><h1>日々リズム</h1><p id="fatal-text" class="gate-lead"></p></div>
+</main>
+
+<div id="app" hidden>
+  <header class="top">
+    <div>
+      <h1>日々リズム</h1>
+      <p class="sub">睡眠とPC利用の記録</p>
+    </div>
+    <div class="top-meta">
+      <span id="updated"></span>
+      <button id="lock" type="button" class="ghost">ロックする</button>
+    </div>
+  </header>
+
+  <p id="sample-banner" class="banner" hidden>画面確認用の合成データを表示しています。実際の記録ではありません。</p>
+
+  <section class="card" aria-labelledby="day-title">
+    <div class="day-nav">
+      <button id="prev" type="button" class="nav" aria-label="前の日">‹</button>
+      <h2 id="day-title"></h2>
+      <button id="next" type="button" class="nav" aria-label="次の日">›</button>
+    </div>
+    <div class="tiles">
+      <div class="tile">
+        <div class="tile-label"><span class="key key-sleep"></span>睡眠</div>
+        <div class="tile-value" id="sleep-value"></div>
+        <div class="tile-note" id="sleep-note"></div>
+      </div>
+      <div class="tile">
+        <div class="tile-label"><span class="key key-pc"></span>PC</div>
+        <div class="tile-value" id="pc-value"></div>
+        <div class="tile-note" id="pc-note"></div>
+      </div>
+    </div>
+    <div id="day-timeline" class="day-timeline"></div>
+    <div id="detail" class="detail"></div>
+  </section>
+
+  <section class="card" aria-labelledby="rhythm-title">
+    <div class="card-head">
+      <h2 id="rhythm-title">リズム表</h2>
+      <div class="seg" role="group" aria-label="表示期間">
+        <button type="button" data-range="14">14日</button>
+        <button type="button" data-range="30">30日</button>
+      </div>
+    </div>
+    <ul class="legend">
+      <li><span class="key key-sleep"></span>睡眠</li>
+      <li><span class="key key-sleep-soft"></span>睡眠（実睡眠は不明）</li>
+      <li><span class="key key-pc"></span>PC稼働</li>
+      <li>※ PCは参考値</li>
+    </ul>
+    <div id="rhythm" class="rhythm"></div>
+  </section>
+
+  <section class="card" aria-labelledby="trend-title">
+    <h2 id="trend-title">推移</h2>
+    <div id="trend"></div>
+  </section>
+
+  <section class="card">
+    <details id="table-details">
+      <summary>表で見る</summary>
+      <div id="table" class="table-wrap"></div>
+    </details>
+  </section>
+
+  <section class="notes" aria-labelledby="notes-title">
+    <h2 id="notes-title">この記録の読み方</h2>
+    <ul>
+      <li>1日は日本時間の0時から24時です。夜の睡眠は日付をまたぐため、その日の0〜24時に入る分だけを数えています。</li>
+      <li>睡眠はスマートバンドの記録です。昼寝などで実際に眠っていた時間が分からない場合は「◯時間〜◯時間」と幅で示します。</li>
+      <li>PCの時間は、PCが「操作中」と判定していた時間です。実際に操作していた時間そのものではなく、機器の影響で長く出る日があります。その日は「参考値」と表示します。</li>
+      <li>「記録なし」「未取得」は、ゼロではなく、分からないという意味です。</li>
+      <li>PCについて記録しているのはアプリ名と時間だけです。画面の内容、閲覧したページ、入力した文字は記録していません。</li>
+    </ul>
+  </section>
+</div>
+
+<div id="tip" class="tip" role="tooltip" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>
