@@ -7,8 +7,8 @@ if (Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue) {
 $scriptPath = Join-Path $PSScriptRoot 'run_daily.ps1'
 $arguments = '-NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "' + $scriptPath + '"'
 $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments -WorkingDirectory $PSScriptRoot
-# 13:30 JST: after the 13:00 sleep import into Notion has finished.
-$trigger = New-ScheduledTaskTrigger -Daily -At '13:30'
+# 20:00 JST: well after the 13:00 sleep import into Notion has finished.
+$trigger = New-ScheduledTaskTrigger -Daily -At '20:00'
 $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 10) -ExecutionTimeLimit (New-TimeSpan -Hours 1)
 $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 $principal = New-ScheduledTaskPrincipal -UserId $identity -LogonType Interactive -RunLevel Limited

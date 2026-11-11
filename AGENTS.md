@@ -38,7 +38,7 @@
 - `pipeline/sample.py`：画面確認用の合成データ
 - `site/`：画面（`index.html`、`app.js`、`style.css`、`robots.txt`）
 - `tests/test_pipeline.py`：統合・検証・暗号化・Notion行の解釈のテスト
-- `run_daily.ps1`、`register_task.ps1`：Windows タスク（`HibiRhythm-Daily`、毎日 13:30）用
+- `run_daily.ps1`、`register_task.ps1`：Windows タスク（`HibiRhythm-Daily`、毎日 20:00）用
 
 ## 5. 実行コマンド
 
