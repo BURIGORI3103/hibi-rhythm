@@ -26,6 +26,26 @@ def pc(**overrides):
     return base
 
 
+class PublishStagingTests(unittest.TestCase):
+    def test_files_are_replaced_without_removing_the_target_folder(self):
+        import tempfile
+        from pathlib import Path
+        from pipeline.build import publish_staging
+        with tempfile.TemporaryDirectory() as folder:
+            staging, target = Path(folder) / "dist.tmp", Path(folder) / "dist"
+            staging.mkdir()
+            target.mkdir()
+            (staging / "index.html").write_text("new", encoding="utf-8")
+            (target / "index.html").write_text("old", encoding="utf-8")
+            (target / "stale.txt").write_text("x", encoding="utf-8")
+            marker = target.stat().st_ctime_ns
+            publish_staging(staging, target)
+            self.assertEqual(sorted(path.name for path in target.iterdir()), ["index.html"])
+            self.assertEqual((target / "index.html").read_text(encoding="utf-8"), "new")
+            self.assertEqual(target.stat().st_ctime_ns, marker)
+            self.assertFalse(staging.exists())
+
+
 class SleepSegmentTests(unittest.TestCase):
     def test_sessions_are_clipped_to_the_calendar_day(self):
         sessions = [session("2026-11-09T22:32:00+09:00", "2026-11-10T07:16:00+09:00"),

@@ -65,10 +65,24 @@ def write_dist(records, passphrase, is_sample):
     shutil.copytree(SITE_DIR, staging)
     (staging / ".nojekyll").write_text("", encoding="utf-8")
     atomic_write(staging / "data.enc.json", json.dumps(envelope, separators=(",", ":")) + "\n")
-    if DIST_DIR.exists():
-        shutil.rmtree(DIST_DIR)
-    staging.rename(DIST_DIR)
+    publish_staging(staging, DIST_DIR)
     return len(plaintext)
+
+
+def publish_staging(staging, target):
+    """staging の中身を target へ1ファイルずつ置き換える。
+
+    target フォルダ自体は消さない。プレビュー用サーバーなどがフォルダを開いていると
+    Windows では削除に失敗し、中身だけが消えた状態で止まるため。
+    """
+    target.mkdir(parents=True, exist_ok=True)
+    names = sorted(path.name for path in staging.iterdir())
+    for name in names:
+        os.replace(staging / name, target / name)
+    for path in target.iterdir():
+        if path.name not in names:
+            shutil.rmtree(path) if path.is_dir() else path.unlink()
+    shutil.rmtree(staging, ignore_errors=True)
 
 
 def describe(record):
@@ -108,6 +122,9 @@ def main(argv=None):
         size = write_dist(records, passphrase, args.sample)
     except (CollectError, ValueError) as error:
         print(f"中断：{error}（dist/ は変更していません）", file=sys.stderr)
+        return 1
+    except OSError as error:
+        print(f"中断：ファイルを書き込めませんでした：{error}（dist/ を確認してからビルドし直してください）", file=sys.stderr)
         return 1
     label = "合成データ" if args.sample else "実データ"
     print(f"ビルド完了（{label}）：{len(records)}日分、暗号化前 {size:,} バイト → dist/")
