@@ -45,6 +45,21 @@ class PublishStagingTests(unittest.TestCase):
             self.assertEqual(target.stat().st_ctime_ns, marker)
             self.assertFalse(staging.exists())
 
+    def test_read_only_folder_can_be_removed(self):
+        import os
+        import stat
+        import tempfile
+        from pathlib import Path
+        from pipeline.build import remove_tree
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / "dist.tmp"
+            target.mkdir()
+            (target / "a.txt").write_text("x", encoding="utf-8")
+            os.chmod(target / "a.txt", stat.S_IREAD)
+            os.chmod(target, stat.S_IREAD)
+            remove_tree(target)
+            self.assertFalse(target.exists())
+
 
 class SleepSegmentTests(unittest.TestCase):
     def test_sessions_are_clipped_to_the_calendar_day(self):

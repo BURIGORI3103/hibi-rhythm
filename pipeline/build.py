@@ -12,6 +12,7 @@ from datetime import date, datetime
 import json
 import os
 import shutil
+import stat
 import sys
 import tempfile
 
@@ -60,13 +61,24 @@ def write_dist(records, passphrase, is_sample):
     if encrypt.decrypt(envelope, passphrase) != plaintext:
         raise RuntimeError("暗号化の検証に失敗しました")
     staging = ROOT / "dist.tmp"
-    if staging.exists():
-        shutil.rmtree(staging)
-    shutil.copytree(SITE_DIR, staging)
+    remove_tree(staging)
+    staging.mkdir()
+    for source in sorted(SITE_DIR.iterdir()):   # site/ は平らな構成。フォルダの属性は引き継がない
+        if source.is_file():
+            shutil.copyfile(source, staging / source.name)
     (staging / ".nojekyll").write_text("", encoding="utf-8")
     atomic_write(staging / "data.enc.json", json.dumps(envelope, separators=(",", ":")) + "\n")
     publish_staging(staging, DIST_DIR)
     return len(plaintext)
+
+
+def remove_tree(path):
+    """フォルダを削除する。Windows では読み取り専用属性が付いていると消せないため、外してから消す。"""
+    def retry_writable(function, name, _error):
+        os.chmod(name, stat.S_IWRITE)
+        function(name)
+    if path.exists():
+        shutil.rmtree(path, onexc=retry_writable)
 
 
 def publish_staging(staging, target):
@@ -81,8 +93,8 @@ def publish_staging(staging, target):
         os.replace(staging / name, target / name)
     for path in target.iterdir():
         if path.name not in names:
-            shutil.rmtree(path) if path.is_dir() else path.unlink()
-    shutil.rmtree(staging, ignore_errors=True)
+            remove_tree(path) if path.is_dir() else path.unlink()
+    remove_tree(staging)
 
 
 def describe(record):
