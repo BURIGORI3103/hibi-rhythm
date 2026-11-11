@@ -209,7 +209,7 @@
       const restCount = (pc.apps_other ? pc.apps_other.count : 0) + hidden.length;
       const restSeconds = (pc.apps_other ? pc.apps_other.seconds : 0) + hidden.reduce((sum, app) => sum + app.seconds, 0);
       if (list.children.length) pcBox.append(list);
-      if (restCount) pcBox.append(el('p', 'empty', `ほか${restCount}件（合計 ${hm(restSeconds / 60)}）`));
+      if (restCount) pcBox.append(el('p', 'empty', `ほか${restCount}件（合計 ${restSeconds < 60 ? '1分未満' : hm(restSeconds / 60)}）`));
     } else {
       pcBox.append(el('p', 'empty', 'アプリの記録がありません'));
     }
