@@ -61,6 +61,19 @@ class PublishStagingTests(unittest.TestCase):
             self.assertFalse(target.exists())
 
 
+class StartDateTests(unittest.TestCase):
+    def test_records_before_the_start_date_are_dropped(self):
+        from pipeline.build import start_date, within
+        records = [{"date": "2026-11-05"}, {"date": "2026-11-06"}, {"date": "2026-11-07"}]
+        self.assertEqual(within(records, start_date({"START_DATE": "2026-11-06"})), records[1:])
+        self.assertEqual(within(records, start_date({})), records)
+
+    def test_malformed_start_date_stops_the_build(self):
+        from pipeline.build import start_date
+        with self.assertRaises(CollectError):
+            start_date({"START_DATE": "11/6"})
+
+
 class SleepSegmentTests(unittest.TestCase):
     def test_sessions_are_clipped_to_the_calendar_day(self):
         sessions = [session("2026-11-09T22:32:00+09:00", "2026-11-10T07:16:00+09:00"),

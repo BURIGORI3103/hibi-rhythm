@@ -37,6 +37,20 @@ def atomic_write(path, content):
             os.unlink(name)
 
 
+def start_date(env):
+    """.env の START_DATE（YYYY-MM-DD）。これより前の日は取り込まず、公開もしない。未設定なら None。"""
+    value = (env.get("START_DATE") or "").strip()
+    try:
+        return date.fromisoformat(value) if value else None
+    except ValueError:
+        raise CollectError(f".env の START_DATE は YYYY-MM-DD 形式で書いてください：{value!r}") from None
+
+
+def within(records, start):
+    """開始日より前のレコードを除く。"""
+    return [record for record in records if start is None or record["date"] >= start.isoformat()]
+
+
 def collect_records(days, env):
     """実データを収集して data/days/ に保存し、保存済みの全日を返す。"""
     pc = collect_pc.collect(days, env.get("ACTIVITYWATCH_PROJECT") or DEFAULT_ACTIVITYWATCH_PROJECT)
@@ -47,7 +61,7 @@ def collect_records(days, env):
     for record in rebuilt:
         atomic_write(DAYS_DIR / f"{record['date']}.json", json.dumps(record, ensure_ascii=False, indent=1) + "\n")
     records = [json.loads(path.read_text(encoding="utf-8")) for path in sorted(DAYS_DIR.glob("*.json"))]
-    return records, rebuilt
+    return within(records, start_date(env)), rebuilt
 
 
 def write_dist(records, passphrase, is_sample):
@@ -130,6 +144,8 @@ def main(argv=None):
                 days = previous_days(today, (today - args.since).days)
             else:
                 days = previous_days(today, max(args.days, 1))
+            start = start_date(env)
+            days = [day for day in days if start is None or day >= start]
             records, rebuilt = collect_records(days, env)
         size = write_dist(records, passphrase, args.sample)
     except (CollectError, ValueError) as error:
