@@ -59,4 +59,6 @@ Python は `C:\Project\HibiRhythm\.venv\Scripts\python.exe`（3.12）。依存�
 ## 6. 関連プロジェクトと同期対象
 
 1. PC 集計の正本は `C:\Project\ActivityWarch` にある。集計ロジックを本プロジェクトへ複製しない。JSON の項目を変えるときは `activitywatch_to_json.py` と `pipeline/merge.py` を同時に直す。
-2. 本プロジェクトは `add_update.py`、XO の仕様書同期、Gemini Book、一括 push バッチの登録対象外である。登録する場合は濱田くんの指示を受けてから行う。
+2. 本プロジェクトは XO の仕様書同期（ミラー：`C:\Project\graviXObsidian\Topics\HibiRhythm\project_context.md`）、`add_update.py`（`--project HibiRhythm`）、Gemini Book（ID：`HibiRhythm`）に登録済み。一括 push バッチには登録していない。
+3. Gemini Book のバンドルは `.json` を含めず、`data/`・`dist/`・`dist-sample/`・`.state/`・`.env` を除外している（`graviXObsidian\sync_gemini_book.py` の `exclude_dirs`）。記録を含むファイルの種類やフォルダを増やすときは、この除外も合わせて直す。
+4. XO 側の関連ノート：`Topics\HibiRhythm\Update_History.md`（履歴）、`Topics\HibiRhythm\Knowledge_Stock.md`（知見）、`reviews\`（レビュー記録）。
