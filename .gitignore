@@ -3,6 +3,8 @@
 data/
 dist/
 dist.tmp/
+dist-sample/
+dist-sample.tmp/
 .state/
 
 .venv/

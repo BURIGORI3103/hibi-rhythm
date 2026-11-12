@@ -1,10 +1,14 @@
 """睡眠データの収集。Notion API から「健康記録」と「睡眠セッション」を読み取るだけで、書き込まない。"""
 
+from datetime import datetime, time, timedelta
 import json
+import sys
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from .collect_pc import CollectError
+from .config import JST
+from .merge import parse_time
 
 API = "https://api.notion.com/v1/"
 NOTION_VERSION = "2026-03-11"
@@ -60,16 +64,46 @@ def select(prop):
     return option.get("name") if option else None
 
 
-def parse_daily(pages):
-    """「健康記録」の行を {日付: 辞書} にする。同じ日付が複数あれば曖昧なので停止する。"""
+TEXT, NUMBER, SELECT = {"title", "rich_text"}, {"number"}, {"select"}
+DAILY_COLUMNS = {
+    "日付": TEXT, "就寝時刻": TEXT, "起床時刻": TEXT, "睡眠集計メモ": TEXT, "睡眠集計状態": SELECT,
+    "睡眠時間（分）": NUMBER, "深い睡眠（分）": NUMBER, "浅い睡眠（分）": NUMBER, "レム睡眠（分）": NUMBER,
+    "就床経過時間（暦日）（分）": NUMBER, "睡眠時間（暦日・下限）（分）": NUMBER,
+    "睡眠時間（暦日・上限）（分）": NUMBER, "歩数": NUMBER,
+}
+SESSION_COLUMNS = {"開始日時": TEXT, "終了日時": TEXT, "判定": SELECT}
+
+
+def require_columns(props, columns, table):
+    """必須列がその型で存在することを確かめる。
+
+    Notion 側で列の名前や型が変わると、値はエラーにならず「空」として読めてしまう。
+    そのまま進むと、保存済みの記録を欠測で上書きするため、ここで止める。
+    """
+    for name, kinds in columns.items():
+        prop = props.get(name)
+        if not isinstance(prop, dict) or prop.get("type") not in kinds:
+            found = "列がありません" if prop is None else f"型が {prop.get('type')!r} です"
+            raise CollectError(f"Notion「{table}」の列「{name}」を読めません（{found}）。"
+                               "列の名前や型を変えた場合は pipeline/collect_sleep.py を合わせて直してください")
+
+
+def parse_daily(pages, days=None):
+    """「健康記録」の行を {日付: 辞書} にする。days を渡すと、その日の行だけを対象にする。
+
+    対象の日に同じ日付の行が複数あれば曖昧なので停止する。対象外の日の重複や列の欠けでは止めない。
+    """
+    wanted = None if days is None else {day.isoformat() for day in days}
     result = {}
     for page in pages:
         props = page["properties"]
+        require_columns(props, {"日付": TEXT}, "健康記録")
         day = text(props.get("日付"))
-        if not day:
+        if not day or (wanted is not None and day not in wanted):
             continue
         if day in result:
             raise CollectError(f"健康記録に同じ日付の行が複数あります：{day}")
+        require_columns(props, DAILY_COLUMNS, "健康記録")
         result[day] = {
             "bed": text(props.get("就寝時刻")),
             "wake": text(props.get("起床時刻")),
@@ -87,28 +121,50 @@ def parse_daily(pages):
     return result
 
 
-def parse_sessions(pages):
-    """「睡眠セッション」の行を開始・終了・判定の並びにする。"""
-    result = []
+def parse_sessions(pages, days=None):
+    """「睡眠セッション」の行を開始・終了・判定の並びにする。days を渡すと、その期間に重なる行だけを返す。
+
+    日時を読めない行は、対象期間かどうかを判断できない。更新全体は止めず、件数を数えて除外する
+    （区間はタイムライン描画専用で、睡眠時間の数値には使わない）。戻り値は (並び, 除外した件数)。
+    """
+    period = None
+    if days:
+        begin = datetime.combine(min(days), time.min, JST)
+        period = (begin, datetime.combine(max(days), time.min, JST) + timedelta(days=1))
+    result, unreadable = [], 0
     for page in pages:
         props = page["properties"]
+        require_columns(props, SESSION_COLUMNS, "睡眠セッション")
         start, end = text(props.get("開始日時")), text(props.get("終了日時"))
         if not start or not end:
             continue
+        try:
+            a, b = parse_time(start), parse_time(end)
+        except ValueError:
+            unreadable += 1
+            continue
+        if a >= b:
+            unreadable += 1
+            continue
+        if period and (b <= period[0] or a >= period[1]):
+            continue
         result.append({"start": start, "end": end, "verdict": select(props.get("判定"))})
-    return sorted(result, key=lambda item: item["start"])
+    return sorted(result, key=lambda item: parse_time(item["start"])), unreadable
 
 
-def collect(token, health_id, session_id):
-    """(日別の辞書, セッションの並び) を返す。"""
+def collect(token, health_id, session_id, days=None):
+    """(日別の辞書, セッションの並び) を返す。days を渡すと、その期間の行だけを解釈する。"""
     if not token or not health_id or not session_id:
         raise CollectError(".env に NOTION_TOKEN と2つのデータソースIDを設定してください（README参照）")
-    return parse_daily(query_all(health_id, token)), parse_sessions(query_all(session_id, token))
+    daily = parse_daily(query_all(health_id, token), days)
+    sessions, unreadable = parse_sessions(query_all(session_id, token), days)
+    if unreadable:
+        print(f"注意：開始・終了日時を読めない睡眠セッションが{unreadable}件あり、タイムラインから除外しました", file=sys.stderr)
+    return daily, sessions
 
 
 def check():
     """Notion に接続できるかだけを確かめる。件数と日付の範囲だけを表示し、記録の中身は出さない。"""
-    import sys
     from .config import load_env
     env = load_env()
     try:

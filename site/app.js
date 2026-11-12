@@ -5,9 +5,10 @@
 
   const STORE_KEY = 'hibi-rhythm-passphrase';
   const DOW = ['日', '月', '火', '水', '木', '金', '土'];
-  const SLEEP_LABEL = { none: '記録なし', unsynced: '未同期', missing: '未取得' };
+  const SLEEP_LABEL = { none: '記録なし', unsynced: '未同期', missing: '未取得', gap: '一部欠測' };
   const SLEEP_HINT = {
     none: 'この日の睡眠記録がありません', unsynced: 'まだ同期されていません', missing: 'まだ取り込まれていません',
+    gap: '集計の一部が欠けているため、時間は不明です',
   };
   const state = { days: [], byDate: new Map(), index: 0, range: 14 };
 
@@ -26,6 +27,7 @@
     const m = whole(min);
     return m >= 60 ? `${Math.floor(m / 60)}時間${m % 60}分` : `${m}分`;
   }
+  const hmShort = (min) => (min > 0 && min < 1 ? '1分未満' : hm(min));
   function short(min) {
     const m = whole(min);
     return `${Math.floor(m / 60)}:${pad(m % 60)}`;
@@ -55,24 +57,38 @@
     return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}`;
   }
 
-  /* ---------- 値の取り出し（不明は null のまま扱う） ---------- */
+  /* ---------- 値の取り出し（不明は null のまま扱う） ----------
+     「値が分かっている」の判定はここだけに置き、表示・棒グラフ・平均のすべてがこれを使う。
+     pipeline/merge.py の sleep_range / pc_state と対になる。 */
+  const isNum = (value) => typeof value === 'number' && Number.isFinite(value);
+  // 睡眠：状態が「確定」「一部不明」で、下限と上限の両方がある日だけ。片方だけの値や未同期の行の値は使わない。
   function sleepRange(sleep) {
-    if (!sleep || sleep.upper == null) return null;
-    return [sleep.lower == null ? sleep.upper : sleep.lower, sleep.upper];
+    if (!sleep || (sleep.state !== 'confirmed' && sleep.state !== 'partial')) return null;
+    return isNum(sleep.lower) && isNum(sleep.upper) ? [sleep.lower, sleep.upper] : null;
+  }
+  function sleepUnknown(sleep) {
+    if (!sleep) return 'missing';
+    if (sleep.state === 'confirmed' || sleep.state === 'partial') return 'gap';   // 状態は値ありなのに下限か上限がない
+    return ['none', 'unsynced'].includes(sleep.state) ? sleep.state : 'missing';
   }
   function sleepText(sleep, format) {
     const range = sleepRange(sleep);
-    if (!range) return SLEEP_LABEL[sleep ? sleep.state : 'missing'] || '未取得';
+    if (!range) return SLEEP_LABEL[sleepUnknown(sleep)];
     return range[0] === range[1] ? format(range[1]) : `${format(range[0])}〜${format(range[1])}`;
   }
+  // PC：ok / caution は値あり。partial は記録の一部が欠けた下限値で、平均と棒グラフには入れない。
+  const pcKind = (pc) => (pc && isNum(pc.active) && ['ok', 'caution', 'partial', 'none'].includes(pc.state) ? pc.state : 'missing');
   function pcMinutes(pc) {
-    return pc && pc.active != null && pc.state !== 'none' ? pc.active / 60 : null;
+    const kind = pcKind(pc);
+    return kind === 'ok' || kind === 'caution' ? pc.active / 60 : null;
   }
   function pcText(pc, format) {
-    if (!pc || pc.state === 'missing') return '未取得';
-    if (pc.state === 'none') return '記録なし';
-    return format(pc.active / 60);
+    const kind = pcKind(pc);
+    if (kind === 'missing') return '未取得';
+    if (kind === 'none') return '記録なし';
+    return kind === 'partial' ? `${format(pc.active / 60)}以上` : format(pc.active / 60);
   }
+  const pcMark = (pc) => ({ caution: '参考値', partial: '一部欠測' }[pcKind(pc)] || '');
   const appName = (name) => name.replace(/\.exe$/i, '');
 
   /* ---------- タイムライン ---------- */
@@ -92,8 +108,10 @@
         const name = kind === 'u' ? '睡眠（実睡眠は不明）' : '睡眠';
         sleep.append(block(a, b, kind === 'u' ? 'is-soft' : 'is-sleep', `${name}\n${clock(a)}〜${clock(b)}（${hm(b - a)}）`));
       }
-      for (const [a, b] of rec.pc.segments) {
-        pc.append(block(a, b, 'is-pc', `PC稼働\n${clock(a)}〜${clock(b)}（${hm(b - a)}）`));
+      // 区間は1分以下の隙間を結合して描いている。時間は区間の長さではなく、実際の稼働分（3番目の値）を出す。
+      for (const [a, b, active] of rec.pc.segments) {
+        const amount = isNum(active) ? `（うち稼働 ${hmShort(active)}）` : '';
+        pc.append(block(a, b, 'is-pc', `PC稼働\n${clock(a)}〜${clock(b)}${amount}`));
       }
     }
     wrap.append(sleep, pc);
@@ -125,8 +143,8 @@
     sleepValue.replaceChildren();
     sleepValue.classList.toggle('is-unknown', !range);
     if (!range) {
-      sleepValue.textContent = SLEEP_LABEL[rec.sleep.state] || '未取得';
-      sleepNote.replaceChildren(el('span', null, SLEEP_HINT[rec.sleep.state] || SLEEP_HINT.missing));
+      sleepValue.textContent = SLEEP_LABEL[sleepUnknown(rec.sleep)];
+      sleepNote.replaceChildren(el('span', null, SLEEP_HINT[sleepUnknown(rec.sleep)]));
     } else {
       if (range[0] === range[1]) sleepValue.append(durNode(range[1]));
       else sleepValue.append(durNode(range[0]), '〜', document.createElement('wbr'), durNode(range[1]));
@@ -137,11 +155,15 @@
     const pcValue = $('pc-value');
     const pcNote = $('pc-note');
     const minutes = pcMinutes(rec.pc);
+    const kind = pcKind(rec.pc);
     pcValue.replaceChildren();
-    pcValue.classList.toggle('is-unknown', minutes == null);
-    if (minutes == null) {
+    pcValue.classList.toggle('is-unknown', minutes == null && kind !== 'partial');
+    if (kind === 'partial') {
+      pcValue.append(durNode(rec.pc.active / 60), el('small', null, '以上'));
+      pcNote.replaceChildren(el('span', null, '記録できた分だけの時間'), badge('一部欠測', true));
+    } else if (minutes == null) {
       pcValue.textContent = pcText(rec.pc);
-      pcNote.replaceChildren(el('span', null, rec.pc.state === 'none' ? 'PCの記録がない日です' : 'まだ取り込まれていません'));
+      pcNote.replaceChildren(el('span', null, kind === 'none' ? 'PCの記録がない日です' : 'まだ取り込まれていません'));
     } else {
       pcValue.append(durNode(minutes));
       pcNote.replaceChildren(el('span', null, '操作中と判定された時間'));
@@ -194,30 +216,32 @@
     pcBox.append(el('h3', null, 'PCで使ったアプリ'));
     const pc = rec.pc;
     if (pc.apps && pc.apps.length && pc.active > 0) {
+      // 上位のアプリは1分未満でも1件ずつ表示する。「ほか」は上位に入らなかった分だけ。
       const list = el('div', 'apps');
       for (const app of pc.apps) {
-        if (app.seconds < 60) continue;
         const row = el('div', 'app');
         const bar = el('div', 'app-bar');
         const fill = el('span');
         fill.style.width = `${Math.max((app.seconds / pc.active) * 100, 0.5)}%`;
         bar.append(fill);
-        row.append(el('span', 'app-name', appName(app.name)), el('span', 'app-time', hm(app.seconds / 60)), bar);
+        const time = app.seconds < 60 ? '1分未満' : hm(app.seconds / 60);
+        row.append(el('span', 'app-name', appName(app.name)), el('span', 'app-time', time), bar);
         list.append(row);
       }
-      const hidden = pc.apps.filter((app) => app.seconds < 60);
-      const restCount = (pc.apps_other ? pc.apps_other.count : 0) + hidden.length;
-      const restSeconds = (pc.apps_other ? pc.apps_other.seconds : 0) + hidden.reduce((sum, app) => sum + app.seconds, 0);
-      if (list.children.length) pcBox.append(list);
-      if (restCount) pcBox.append(el('p', 'empty', `ほか${restCount}件（合計 ${restSeconds < 60 ? '1分未満' : hm(restSeconds / 60)}）`));
+      pcBox.append(list);
+      const rest = pc.apps_other || { count: 0, seconds: 0 };
+      if (rest.count) pcBox.append(el('p', 'empty', `ほか${rest.count}件（合計 ${rest.seconds < 60 ? '1分未満' : hm(rest.seconds / 60)}）`));
     } else {
       pcBox.append(el('p', 'empty', 'アプリの記録がありません'));
     }
     box.append(sleepBox, pcBox);
 
     const caveat = el('div', 'caveat');
-    if (pc.state === 'caution') {
+    if (pcKind(pc) === 'caution') {
       caveat.append(el('p', null, `PC：操作中の判定が${hm(pc.longest_not_afk / 60)}途切れずに続いた区間があります。機器の影響で席を離れていた時間も含まれている可能性があるため、参考値としています。`));
+    }
+    if (pcKind(pc) === 'partial') {
+      caveat.append(el('p', null, `PC：操作中と判定された時間のうち約${hm((pc.not_afk - pc.active) / 60)}は、使っていたアプリの記録が欠けています。実際の時間は表示より長いため「以上」と表示し、平均には含めていません。`));
     }
     for (const warning of rec.warnings || []) caveat.append(el('p', null, `確認中：${warning}`));
     if (sleep.note) {
@@ -251,7 +275,7 @@
       const sleepLine = el('span');
       const pcLine = el('span');
       sleepLine.append(el('b', null, '睡'), rec ? sleepText(rec.sleep, short) : '—');
-      pcLine.append(el('b', null, 'PC'), rec ? pcText(rec.pc, short) + (rec.pc.state === 'caution' ? ' ※' : '') : '—');
+      pcLine.append(el('b', null, 'PC'), rec ? pcText(rec.pc, short) + (pcKind(rec.pc) === 'caution' ? ' ※' : '') : '—');
       totals.append(sleepLine, pcLine);
       if (rec) {
         row.dataset.date = date;
@@ -349,7 +373,8 @@
     });
     const pcTips = dates.map((date, i) => {
       const rec = recs[i];
-      return `${dayLabel(date)}\nPC ${rec ? pcText(rec.pc, hm) : '未取得'}${rec && rec.pc.state === 'caution' ? '（参考値）' : ''}`;
+      const mark = rec ? pcMark(rec.pc) : '';
+      return `${dayLabel(date)}\nPC ${rec ? pcText(rec.pc, hm) : '未取得'}${mark ? `（${mark}）` : ''}`;
     });
 
     box.replaceChildren(
@@ -370,7 +395,8 @@
       const p = parseDate(rec.date);
       const notes = [];
       if (sleepRange(rec.sleep) && rec.sleep.state === 'partial') notes.push('睡眠は一部不明');
-      if (rec.pc.state === 'caution') notes.push('PCは参考値');
+      if (!sleepRange(rec.sleep) && sleepUnknown(rec.sleep) === 'gap') notes.push('睡眠は集計の一部が欠測');
+      if (pcMark(rec.pc)) notes.push(`PCは${pcMark(rec.pc)}`);
       const row = el('tr');
       [`${p.y}/${pad(p.m)}/${pad(p.d)}（${p.dow}）`, sleepText(rec.sleep, hm), rec.sleep.bed || '—', rec.sleep.wake || '—',
         pcText(rec.pc, hm), rec.steps == null ? '—' : rec.steps.toLocaleString('ja-JP'), notes.join('、')]
@@ -400,9 +426,14 @@
   function bytes(base64) {
     return Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
   }
+  // 合言葉の前後から取り除く文字。trim() は Python の strip() と対象が少し違うため使わず、
+  // pipeline/encrypt.py の EDGE_CHARS と同じ文字を明示する。
+  const EDGE = '\\t\\n\\v\\f\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff';
+  const EDGES = new RegExp(`^[${EDGE}]+|[${EDGE}]+$`, 'g');
+  const normalize = (passphrase) => passphrase.normalize('NFKC').replace(EDGES, '');
   async function decrypt(envelope, passphrase) {
     const encoder = new TextEncoder();
-    const material = await crypto.subtle.importKey('raw', encoder.encode(passphrase.normalize('NFKC').trim()), 'PBKDF2', false, ['deriveKey']);
+    const material = await crypto.subtle.importKey('raw', encoder.encode(normalize(passphrase)), 'PBKDF2', false, ['deriveKey']);
     const key = await crypto.subtle.deriveKey(
       { name: 'PBKDF2', salt: bytes(envelope.salt), iterations: envelope.iterations, hash: 'SHA-256' },
       material, { name: 'AES-GCM', length: 256 }, false, ['decrypt'],
@@ -416,19 +447,24 @@
     }
     return JSON.parse(new TextDecoder().decode(plain));
   }
+  // 合言葉を保存するのは「この端末に記憶する」を選んだときだけ（localStorage）。
+  // 選ばなかった場合はどこにも保存しない。復号した記録はこのページのメモリにあるので表示は続けられ、
+  // 再読み込みやタブを閉じたあとは入力し直しになる。
   const store = {
     get() {
-      try { return sessionStorage.getItem(STORE_KEY) || localStorage.getItem(STORE_KEY); } catch (error) { return null; }
+      try { return localStorage.getItem(STORE_KEY); } catch (error) { return null; }
     },
     set(value, keep) {
       try {
-        sessionStorage.setItem(STORE_KEY, value);
         if (keep) localStorage.setItem(STORE_KEY, value);
         else localStorage.removeItem(STORE_KEY);
       } catch (error) { /* 保存できない環境でも表示は続ける */ }
     },
     clear() {
-      try { sessionStorage.removeItem(STORE_KEY); localStorage.removeItem(STORE_KEY); } catch (error) { /* 同上 */ }
+      try { localStorage.removeItem(STORE_KEY); } catch (error) { /* 同上 */ }
+    },
+    dropLegacy() {   // 以前の版がタブ単位で保存していた合言葉を消す
+      try { sessionStorage.removeItem(STORE_KEY); } catch (error) { /* 同上 */ }
     },
   };
 
@@ -469,6 +505,7 @@
       fatal('データを読み込めませんでした。時間をおいて再読み込みしてください。');
       return;
     }
+    store.dropLegacy();
     const saved = store.get();
     if (saved) {
       try {

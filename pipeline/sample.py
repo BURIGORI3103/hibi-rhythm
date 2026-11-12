@@ -46,8 +46,11 @@ def make_daily(day, sessions, rng):
     }
 
 
-def make_pc(day, daily_segments, rng, stuck=False):
-    """起きている時間帯に操作ブロックを置く。stuck=True は離席判定が効かなかった日の再現。"""
+def make_pc(day, daily_segments, rng, stuck=False, window_gap=0.0):
+    """起きている時間帯に操作ブロックを置く。stuck=True は離席判定が効かなかった日の再現。
+
+    window_gap は、操作中なのにウィンドウ記録が欠けていた秒数（「一部欠測」の日の再現）。
+    """
     asleep = [False] * 1440
     for a, b, _ in daily_segments:
         for minute in range(a, b):
@@ -80,8 +83,9 @@ def make_pc(day, daily_segments, rng, stuck=False):
                   key=lambda app: -app["seconds"]) if active else []
     afk = 0.0 if stuck else min(86400 - active, rng.randint(1800, 14400))
     longest = max((b - a for a, b in spans), default=0.0)
-    return {"date": day.isoformat(), "active_seconds": active, "not_afk_seconds": active, "afk_seconds": afk,
-            "unknown_seconds": 86400 - active - afk, "window_seconds": active, "apps": apps, "hours": hours,
+    not_afk = min(active + window_gap, 86400 - afk)
+    return {"date": day.isoformat(), "active_seconds": active, "not_afk_seconds": not_afk, "afk_seconds": afk,
+            "unknown_seconds": 86400 - not_afk - afk, "window_seconds": active, "apps": apps, "hours": hours,
             "spans": spans, "longest_not_afk_seconds": longest, "long_not_afk": longest >= 21600}
 
 
@@ -94,6 +98,9 @@ def generate(today, count=30, seed=20261111):
     for index, day in enumerate(days):
         daily = make_daily(day, sessions, rng)
         segments = sleep_segments(day, sessions)
-        pc = None if index == 3 else make_pc(day, segments, rng, stuck=(index == count - 6))
+        if index == count - 4 and daily.get("lower") is not None:
+            daily["lower"] = None   # 下限だけ欠けた日（睡眠の「一部欠測」）の再現
+        pc = None if index == 3 else make_pc(day, segments, rng, stuck=(index == count - 6),
+                                             window_gap=2400.0 if index == count - 9 else 0.0)
         records.append(build_record(day, pc, daily, sessions))
     return records

@@ -132,7 +132,7 @@ class RecordTests(unittest.TestCase):
         self.assertEqual(record["active"], 3600)
         self.assertEqual(len(record["apps"]), 12)
         self.assertEqual(record["apps_other"]["count"], 3)
-        self.assertEqual(record["segments"], [[540.0, 600.5]])
+        self.assertEqual(record["segments"], [[540.0, 600.5, 60.0]])
         caution = build_record(DAY, pc(long_not_afk=True, longest_not_afk_seconds=30000.0), None, [])["pc"]
         self.assertEqual(caution["state"], "caution")
         empty = build_record(DAY, pc(active_seconds=0.0, not_afk_seconds=0.0, afk_seconds=0.0,
@@ -140,7 +140,7 @@ class RecordTests(unittest.TestCase):
         self.assertEqual(empty["state"], "none")
 
     def test_gap_longer_than_a_minute_is_kept(self):
-        self.assertEqual(pc_segments([[0, 600], [661, 1200]]), [[0.0, 10.0], [11.0, 20.0]])
+        self.assertEqual(pc_segments([[0, 600], [661, 1200]]), [[0.0, 10.0, 10.0], [11.0, 20.0, 9.0]])
 
     def test_impossible_values_stop_the_build(self):
         with self.assertRaises(ValueError):
@@ -175,10 +175,21 @@ class NotionParsingTests(unittest.TestCase):
     def page(self, **props):
         return {"properties": props}
 
+    def blank_daily(self, day=None):
+        """必須列がすべてそろった、値が空の「健康記録」の行。"""
+        from pipeline.collect_sleep import DAILY_COLUMNS, NUMBER, SELECT
+        props = {}
+        for name, kinds in DAILY_COLUMNS.items():
+            kind = "number" if kinds is NUMBER else "select" if kinds is SELECT else "rich_text"
+            props[name] = {"type": kind, kind: [] if kind == "rich_text" else None}
+        if day:
+            props["日付"] = {"type": "title", "title": [{"plain_text": day}]}
+        return props
+
     def test_daily_rows(self):
         title = {"type": "title", "title": [{"plain_text": "2026-11-10"}]}
         rich = {"type": "rich_text", "rich_text": [{"plain_text": "22:"}, {"plain_text": "32"}]}
-        pages = [self.page(**{"日付": title, "就寝時刻": rich,
+        pages = [self.page(**{**self.blank_daily(), "日付": title, "就寝時刻": rich,
                               "睡眠時間（暦日・下限）（分）": {"type": "number", "number": 568},
                               "睡眠時間（暦日・上限）（分）": {"type": "number", "number": 598},
                               "睡眠集計状態": {"type": "select", "select": {"name": "一部不明"}},
@@ -198,10 +209,255 @@ class NotionParsingTests(unittest.TestCase):
                               "判定": {"type": "select", "select": {"name": "採用"}}}),
                  self.page(**{"開始日時": rich("2026-11-10T08:40:00+09:00"), "終了日時": rich("2026-11-10T09:10:00+09:00"),
                               "判定": {"type": "select", "select": None}}),
-                 self.page(**{"開始日時": {"type": "rich_text", "rich_text": []}, "終了日時": rich("x")})]
-        sessions = parse_sessions(pages)
+                 self.page(**{"開始日時": {"type": "rich_text", "rich_text": []}, "終了日時": rich("x"),
+                              "判定": {"type": "select", "select": None}})]
+        sessions, unreadable = parse_sessions(pages)
+        self.assertEqual(unreadable, 0)
         self.assertEqual([item["start"][11:16] for item in sessions], ["08:40", "21:48"])
         self.assertEqual([item["verdict"] for item in sessions], [None, "採用"])
+
+
+    def test_duplicates_outside_the_period_do_not_stop_the_update(self):
+        pages = [self.page(**self.blank_daily("2026-10-01")), self.page(**self.blank_daily("2026-10-01")),
+                 self.page(**self.blank_daily("2026-11-10"))]
+        self.assertEqual(list(parse_daily(pages, [DAY])), ["2026-11-10"])
+        with self.assertRaises(CollectError):
+            parse_daily(pages)
+        with self.assertRaises(CollectError):
+            parse_daily([*pages, self.page(**self.blank_daily("2026-11-10"))], [DAY])
+
+    def test_renamed_or_retyped_column_stops_instead_of_reading_as_empty(self):
+        renamed = self.blank_daily("2026-11-10")
+        renamed["睡眠（上限）"] = renamed.pop("睡眠時間（暦日・上限）（分）")
+        with self.assertRaises(CollectError):
+            parse_daily([self.page(**renamed)], [DAY])
+        retyped = self.blank_daily("2026-11-10")
+        retyped["歩数"] = {"type": "formula", "formula": {"type": "number", "number": 5000}}
+        with self.assertRaises(CollectError):
+            parse_daily([self.page(**retyped)], [DAY])
+        without_date = self.blank_daily("2026-11-10")
+        del without_date["日付"]
+        with self.assertRaises(CollectError):
+            parse_daily([self.page(**without_date)], [DAY])
+        with self.assertRaises(CollectError):
+            parse_sessions([self.page(**{"開始日時": {"type": "rich_text", "rich_text": []}})])
+
+    def test_sessions_are_limited_to_the_period_and_unreadable_rows_are_counted(self):
+        def row(start, end):
+            def rich(value):
+                return {"type": "rich_text", "rich_text": [{"plain_text": value}]}
+            return self.page(**{"開始日時": rich(start), "終了日時": rich(end),
+                                "判定": {"type": "select", "select": {"name": "採用"}}})
+        pages = [row("2026-11-09T22:00:00+09:00", "2026-11-10T06:00:00+09:00"),
+                 row("2026-11-10T23:00:00+09:00", "2026-11-11T06:00:00+09:00"),
+                 row("2026-11-08T22:00:00+09:00", "2026-11-09T06:00:00+09:00"),
+                 row("2026-11-11T00:00:00+09:00", "2026-11-11T06:00:00+09:00"),
+                 row("きのうの夜", "けさ"),
+                 row("2026-11-10T06:00:00+09:00", "2026-11-10T05:00:00+09:00")]
+        sessions, unreadable = parse_sessions(pages, [DAY])
+        self.assertEqual([item["start"][:13] for item in sessions], ["2026-11-09T22", "2026-11-10T23"])
+        self.assertEqual(unreadable, 2)
+
+
+class UnknownValueTests(unittest.TestCase):
+    """欠測を確定値として扱わない。"""
+
+    def test_one_sided_or_unsynced_sleep_is_unknown(self):
+        from pipeline.merge import sleep_range
+        self.assertEqual(sleep_range({"state": "confirmed", "lower": 400, "upper": 430}), (400, 430))
+        self.assertIsNone(sleep_range({"state": "partial", "lower": None, "upper": 430}))
+        self.assertIsNone(sleep_range({"state": "confirmed", "lower": 400, "upper": None}))
+        self.assertIsNone(sleep_range({"state": "unsynced", "lower": 400, "upper": 430}))
+        self.assertIsNone(sleep_range({"state": "missing"}))
+
+    def test_one_sided_sleep_is_reported(self):
+        daily = {"state": "一部不明", "lower": None, "upper": 430, "in_bed": None}
+        record = build_record(DAY, None, daily, [])
+        self.assertIn("不明として扱います", record["warnings"][0])
+        unknown = build_record(DAY, None, {"state": "集計中", "lower": 400, "upper": 430}, [])
+        self.assertEqual(unknown["sleep"]["state"], "missing")
+
+    def test_missing_window_records_make_the_pc_total_partial(self):
+        record = build_record(DAY, pc(not_afk_seconds=3600.4 + 601), None, [])["pc"]
+        self.assertEqual(record["state"], "partial")
+        self.assertEqual(build_record(DAY, pc(not_afk_seconds=3600.4 + 599), None, [])["pc"]["state"], "ok")
+        both = build_record(DAY, pc(not_afk_seconds=30000.0, long_not_afk=True), None, [])["pc"]
+        self.assertEqual(both["state"], "partial")
+
+    def test_saved_records_get_the_current_judgement(self):
+        from pipeline.merge import refresh
+        saved = build_record(DAY, pc(), None, [])
+        saved["pc"]["not_afk"] = saved["pc"]["active"] + 5000
+        self.assertEqual(refresh(saved)["pc"]["state"], "partial")
+        untouched = build_record(DAY, None, None, [])
+        self.assertEqual(refresh(untouched)["pc"], {"state": "missing", "segments": []})
+
+    def test_merged_gap_is_not_counted_as_active_time(self):
+        self.assertEqual(pc_segments([[0, 600], [660, 1200]]), [[0.0, 20.0, 19.0]])
+
+
+class DatasetValidationTests(unittest.TestCase):
+    """保存済みの日も含め、公開する全レコードを検証する。"""
+
+    def record(self, day="2026-11-10"):
+        return build_record(date.fromisoformat(day), pc(), None, [])
+
+    def test_future_duplicate_and_early_records_stop_the_build(self):
+        from pipeline.merge import validate_dataset
+        today = date(2026, 11, 11)
+        validate_dataset([self.record("2026-11-09"), self.record("2026-11-10")], today, date(2026, 11, 9))
+        for records, start in (([self.record("2026-11-11")], None),
+                               ([self.record("2026-11-12")], None),
+                               ([self.record(), self.record()], None),
+                               ([self.record("2026-11-08")], date(2026, 11, 9))):
+            with self.assertRaises(ValueError):
+                validate_dataset(records, today, start)
+
+    def test_malformed_saved_records_are_rejected(self):
+        def broken(change):
+            record = self.record()
+            change(record)
+            return record
+        cases = [lambda r: r.update(date="2026-11-31"), lambda r: r.update(date="11/10"),
+                 lambda r: r.update(memo="x"), lambda r: r.pop("pc"),
+                 lambda r: r["pc"].update(title="ウィンドウの題名"), lambda r: r["pc"].update(active="3600"),
+                 lambda r: r["pc"].update(state="fine"), lambda r: r["pc"]["hours"].pop(),
+                 lambda r: r["pc"]["apps"][0].update(url="x"), lambda r: r["pc"].update(segments=[[10, 20, 30]]),
+                 lambda r: r["sleep"].update(state="confirmed", upper=2000), lambda r: r["sleep"].update(segments="x"),
+                 lambda r: r.update(steps=-1), lambda r: r.update(steps=float("nan"))]
+        for index, change in enumerate(cases):
+            with self.subTest(case=index), self.assertRaises(ValueError):
+                validate(broken(change))
+        with self.assertRaises(ValueError):
+            validate([])
+
+    def test_saved_file_name_must_match_its_date(self):
+        import tempfile
+        from pathlib import Path
+        from pipeline.build import load_saved
+        with tempfile.TemporaryDirectory() as folder:
+            (Path(folder) / "2026-11-10.json").write_text(json.dumps(self.record()), encoding="utf-8")
+            self.assertEqual([record["date"] for record in load_saved(Path(folder))], ["2026-11-10"])
+            (Path(folder) / "2026-11-09.json").write_text(json.dumps(self.record()), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                load_saved(Path(folder))
+            (Path(folder) / "2026-11-09.json").write_text("{", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                load_saved(Path(folder))
+
+
+class DeployInspectionTests(unittest.TestCase):
+    """公開前の検査。許可した一式、所定の暗号形式、合成でないデータだけを通す。"""
+
+    PASSPHRASE = "test-passphrase-for-inspection"
+    TODAY = date(2026, 11, 11)
+
+    def make(self, folder, is_sample=False, passphrase=None, records=None):
+        from pathlib import Path
+        from pipeline.config import SCHEMA_VERSION, SITE_DIR, STATIC_FILES, TIMEZONE_NAME
+        folder = Path(folder)
+        for name in STATIC_FILES:
+            (folder / name).write_bytes((SITE_DIR / name).read_bytes())
+        (folder / ".nojekyll").write_bytes(b"")
+        dataset = {"schema": SCHEMA_VERSION, "timezone": TIMEZONE_NAME, "sample": is_sample,
+                   "generated_at": "2026-11-11T08:00:00+09:00",
+                   "days": [build_record(DAY, pc(), None, [])] if records is None else records}
+        envelope = encrypt.encrypt(json.dumps(dataset).encode("utf-8"), passphrase or self.PASSPHRASE)
+        envelope["sample"] = is_sample
+        (folder / "data.enc.json").write_text(json.dumps(envelope), encoding="utf-8")
+        return folder, envelope
+
+    def rejected(self, folder):
+        from pipeline.deploy import inspect
+        with self.assertRaises(RuntimeError) as caught:
+            inspect(folder, self.PASSPHRASE, self.TODAY)
+        return str(caught.exception)
+
+    def test_a_proper_build_passes(self):
+        import tempfile
+        from pipeline.deploy import inspect
+        with tempfile.TemporaryDirectory() as folder:
+            target, _ = self.make(folder)
+            self.assertEqual(inspect(target, self.PASSPHRASE, self.TODAY), 1)
+
+    def test_plaintext_json_is_rejected(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            target, _ = self.make(folder)
+            plain = {"sample": False, "days": [build_record(DAY, pc(), None, [])]}
+            (target / "data.enc.json").write_text(json.dumps(plain), encoding="utf-8")
+            self.assertIn("公開できません", self.rejected(target))
+
+    def test_unexpected_missing_and_nested_files_are_rejected(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            target, _ = self.make(folder)
+            (target / "2026-11-10.json").write_text("{}", encoding="utf-8")
+            self.assertIn("想定外", self.rejected(target))
+        with tempfile.TemporaryDirectory() as folder:
+            target, _ = self.make(folder)
+            (target / "robots.txt").unlink()
+            self.assertIn("不足", self.rejected(target))
+        with tempfile.TemporaryDirectory() as folder:
+            target, _ = self.make(folder)
+            (target / "days").mkdir()
+            self.assertIn("ファイル以外", self.rejected(target))
+
+    def test_sample_data_is_rejected_even_if_the_outer_flag_is_edited(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            target, _ = self.make(folder, is_sample=True)
+            self.assertIn("合成データ", self.rejected(target))
+        with tempfile.TemporaryDirectory() as folder:
+            target, envelope = self.make(folder, is_sample=True)
+            envelope["sample"] = False
+            (target / "data.enc.json").write_text(json.dumps(envelope), encoding="utf-8")
+            self.assertIn("合成データ", self.rejected(target))
+        with tempfile.TemporaryDirectory() as folder:
+            target, envelope = self.make(folder)
+            del envelope["sample"]
+            (target / "data.enc.json").write_text(json.dumps(envelope), encoding="utf-8")
+            self.rejected(target)
+
+    def test_weakened_or_foreign_envelopes_are_rejected(self):
+        import tempfile
+        for change in ({"iterations": 1000}, {"v": 2}, {"aad": "other"}, {"salt": "AAAA"}, {"extra": 1}):
+            with self.subTest(change=change), tempfile.TemporaryDirectory() as folder:
+                target, envelope = self.make(folder)
+                envelope.update(change)
+                (target / "data.enc.json").write_text(json.dumps(envelope), encoding="utf-8")
+                self.rejected(target)
+
+    def test_other_passphrase_modified_page_and_invalid_records_are_rejected(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as folder:
+            target, _ = self.make(folder, passphrase="another-passphrase-entirely")
+            self.assertIn("復号できません", self.rejected(target))
+        with tempfile.TemporaryDirectory() as folder:
+            target, _ = self.make(folder)
+            with open(target / "app.js", "ab") as stream:
+                stream.write(b"\n// changed after build\n")
+            self.assertIn("site/ と一致しません", self.rejected(target))
+        with tempfile.TemporaryDirectory() as folder:
+            future = build_record(self.TODAY, pc(), None, [])
+            target, _ = self.make(folder, records=[future])
+            self.assertIn("検証を通りません", self.rejected(target))
+
+
+class PassphraseNormalizationTests(unittest.TestCase):
+    def test_edges_are_trimmed_the_same_way_as_the_browser(self):
+        self.assertEqual(encrypt.normalize("﻿ 合言葉 abc　﻿"), "合言葉 abc")
+        self.assertEqual(encrypt.normalize("abc\x85 "), "abc")
+        self.assertEqual(encrypt.normalize("a﻿b"), "a﻿b")
+
+    def test_browser_uses_the_same_character_list(self):
+        import re
+        from pipeline.config import SITE_DIR
+        source = (SITE_DIR / "app.js").read_text(encoding="utf-8")
+        edge = re.search(r"const EDGE = '([^']*)';", source).group(1)
+        pattern = re.compile(f"[{edge.encode('ascii').decode('unicode_escape')}]")
+        browser = {chr(code) for code in range(0x110000) if pattern.fullmatch(chr(code))}
+        self.assertEqual(browser, set(encrypt.EDGE_CHARS))
 
 
 class SampleTests(unittest.TestCase):
@@ -211,7 +467,7 @@ class SampleTests(unittest.TestCase):
         self.assertEqual(len(first), 30)
         self.assertEqual(first[-1]["date"], "2026-11-10")
         states = {record["pc"]["state"] for record in first}
-        self.assertTrue({"ok", "caution", "missing"} <= states)
+        self.assertTrue({"ok", "caution", "partial", "missing"} <= states)
 
 
 if __name__ == "__main__":

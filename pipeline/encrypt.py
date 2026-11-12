@@ -17,9 +17,37 @@ ITERATIONS = 600_000
 AAD = "hibi-rhythm-v1"
 
 
+# 前後から取り除く文字。Python の str.strip() と JavaScript の trim() は対象が少し違う
+# （U+FEFF や U+0085 など）ため、両方の和集合をここと site/app.js の EDGE に同じ内容で書く。
+EDGE_CHARS = ("\t\n\v\f\r\x1c\x1d\x1e\x1f \x85\xa0 "
+              + "".join(chr(code) for code in range(0x2000, 0x200B))
+              + "    　﻿")
+
+
 def normalize(passphrase):
     """全角・半角や前後の空白の違いで復号に失敗しないよう揃える。"""
-    return unicodedata.normalize("NFKC", passphrase).strip()
+    return unicodedata.normalize("NFKC", passphrase).strip(EDGE_CHARS)
+
+
+def check_envelope(envelope):
+    """封筒が、この実装の出力形式そのものであることを確かめる。平文や別形式なら ValueError。"""
+    expected = {"v": 1, "kdf": "PBKDF2-SHA256", "iterations": ITERATIONS, "cipher": "AES-256-GCM",
+                "compression": "gzip", "aad": AAD}
+    if not isinstance(envelope, dict) or set(envelope) != {*expected, "salt", "iv", "data", "sample"}:
+        raise ValueError("暗号化データの項目が想定と違います")
+    for key, value in expected.items():
+        if type(envelope[key]) is not type(value) or envelope[key] != value:
+            raise ValueError(f"暗号化データの {key} が想定と違います")
+    sizes = {}
+    for key in ("salt", "iv", "data"):
+        try:
+            sizes[key] = len(base64.b64decode(envelope[key], validate=True))
+        except (TypeError, ValueError):
+            raise ValueError(f"暗号化データの {key} を読めません") from None
+    if sizes["salt"] != 16 or sizes["iv"] != 12 or sizes["data"] <= 16:
+        raise ValueError("暗号化データの長さが想定と違います")
+    if envelope["sample"] is not False:
+        raise ValueError("合成データ、または合成データかどうかが不明なデータです")
 
 
 def derive_key(passphrase, salt, iterations):

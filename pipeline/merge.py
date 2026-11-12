@@ -2,14 +2,27 @@
 
 方針：不明は不明として残し、推測で補わない。睡眠時間は Notion の暦日集計（下限・上限）を
 そのまま採用し、ここでは再計算しない。区間はタイムライン描画のためだけに使う。
+
+「値が分かっている」の判定（sleep_range と PC の state）は site/app.js の sleepRange / pcMinutes と
+対になる。片方だけを変えない。
 """
 
-from datetime import datetime, time, timedelta
+from datetime import date, datetime, time, timedelta
+import math
 
-from .config import JST, MAX_APPS_PER_DAY, PC_GAP_MERGE_SECONDS
+from .config import JST, MAX_APPS_PER_DAY, PC_GAP_MERGE_SECONDS, PC_WINDOW_GAP_SECONDS
 
 SLEEP_STATES = {"確定": "confirmed", "一部不明": "partial", "記録なし": "none", "未同期": "unsynced"}
 ADOPTED = {"採用": "s", "採用（段階なし）": "u"}   # s=段階あり、u=実睡眠が不明
+
+SLEEP_STATE_VALUES = {*SLEEP_STATES.values(), "missing"}
+SLEEP_NUMBERS = ("lower", "upper", "in_bed", "night", "deep", "light", "rem")
+SLEEP_TEXTS = ("bed", "wake", "note")
+# ok=確定、caution=参考値（過大の可能性）、partial=一部欠測（過小）、none=記録なし、missing=未取得
+PC_STATE_VALUES = {"ok", "caution", "partial", "none", "missing"}
+PC_TOTALS = ("active", "not_afk", "afk", "unknown", "longest_not_afk")
+PC_KEYS = {"state", "segments", "hours", "apps", "apps_other", *PC_TOTALS}
+RECORD_KEYS = {"date", "sleep", "pc", "steps", "warnings"}
 
 
 def parse_time(value):
@@ -43,14 +56,30 @@ def sleep_segments(day, sessions):
 
 
 def pc_segments(spans):
-    """秒単位の稼働区間を、短い隙間を結合した分単位の [開始, 終了] にする（描画専用）。"""
+    """秒単位の稼働区間を、短い隙間を結合した分単位の [開始, 終了, うち稼働] にする（描画専用）。
+
+    結合した隙間は稼働ではないので、区間の長さとは別に実際の稼働分を持たせる。
+    """
     merged = []
     for a, b in spans:
         if merged and a - merged[-1][1] <= PC_GAP_MERGE_SECONDS:
+            merged[-1][2] += max(b - max(a, merged[-1][1]), 0)
             merged[-1][1] = max(merged[-1][1], b)
         else:
-            merged.append([a, b])
-    return [[round(a / 60, 1), round(b / 60, 1)] for a, b in merged]
+            merged.append([a, b, b - a])
+    return [[round(a / 60, 1), round(b / 60, 1), round(active / 60, 1)] for a, b, active in merged]
+
+
+def sleep_range(sleep):
+    """睡眠時間が分かっている日だけ (下限, 上限) を返す。それ以外は None（不明）。
+
+    状態が「確定」「一部不明」で、下限と上限の両方がある場合に限る。片方だけの値や、
+    未同期の行に残っている値を確定値として扱わない。
+    """
+    if sleep.get("state") not in ("confirmed", "partial"):
+        return None
+    lower, upper = sleep.get("lower"), sleep.get("upper")
+    return None if lower is None or upper is None else (lower, upper)
 
 
 def build_sleep(day, daily, sessions):
@@ -60,33 +89,42 @@ def build_sleep(day, daily, sessions):
         return {"state": "missing", "segments": segments}, warnings
     state = SLEEP_STATES.get(daily.get("state"))
     if state is None:
-        state = "partial" if daily.get("upper") is not None else "missing"
-        warnings.append(f"睡眠集計状態が未知の値です：{daily.get('state')!r}")
+        state = "missing"
+        warnings.append(f"睡眠集計状態が未知の値のため、睡眠時間を不明として扱います：{daily.get('state')!r}")
     sleep = {"state": state, "segments": segments}
-    for key in ("lower", "upper", "in_bed", "night", "deep", "light", "rem"):
+    for key in SLEEP_NUMBERS:
         value = daily.get(key)
         sleep[key] = None if value is None else round(value)
-    for key in ("bed", "wake", "note"):
+    for key in SLEEP_TEXTS:
         sleep[key] = daily.get(key)
+    if state in ("confirmed", "partial") and sleep_range(sleep) is None:
+        warnings.append("睡眠時間の下限か上限が記録されていないため、睡眠時間を不明として扱います")
     union = sum(b - a for a, b, _ in segments)
     if sleep["in_bed"] is not None and abs(union - sleep["in_bed"]) > 1:
         warnings.append(f"睡眠区間の合計（{union}分）がNotionの就床経過時間（{sleep['in_bed']}分）と一致しません")
     return sleep, warnings
 
 
+def pc_state(pc):
+    """集計値から状態を決める。pc は build_pc 後の項目名（active / not_afk / unknown）で渡す。
+
+    not-afk なのにウィンドウ記録がない時間が長い日は、稼働時間が実際より短く出ている。
+    確定値として扱わず「一部欠測」にする（過大の疑いである「参考値」より優先する）。
+    """
+    if pc["unknown"] >= 86399 and pc["active"] == 0:
+        return "none"
+    if pc["not_afk"] - pc["active"] > PC_WINDOW_GAP_SECONDS:
+        return "partial"
+    return "caution" if pc["state"] == "caution" else "ok"
+
+
 def build_pc(pc):
     if pc is None:
         return {"state": "missing", "segments": []}
-    if pc["unknown_seconds"] >= 86399 and pc["active_seconds"] == 0:
-        state = "none"
-    elif pc["long_not_afk"]:
-        state = "caution"
-    else:
-        state = "ok"
     apps = [{"name": app["name"], "seconds": round(app["seconds"])} for app in pc["apps"]]
     shown, rest = apps[:MAX_APPS_PER_DAY], apps[MAX_APPS_PER_DAY:]
-    return {
-        "state": state,
+    result = {
+        "state": "caution" if pc["long_not_afk"] else "ok",
         "active": round(pc["active_seconds"]),
         "not_afk": round(pc["not_afk_seconds"]),
         "afk": round(pc["afk_seconds"]),
@@ -97,6 +135,17 @@ def build_pc(pc):
         "apps": shown,
         "apps_other": {"count": len(rest), "seconds": sum(app["seconds"] for app in rest)},
     }
+    result["state"] = pc_state(result)
+    return result
+
+
+def refresh(record):
+    """保存済みレコードの欠測判定を、いまの基準で付け直す（数値は変えない）。"""
+    pc = record.get("pc")
+    if isinstance(pc, dict) and pc.get("state") in ("ok", "caution", "partial", "none"):
+        if all(is_number(pc.get(key)) for key in ("active", "not_afk", "unknown")):
+            pc["state"] = pc_state(pc)
+    return record
 
 
 def build_record(day, pc, daily, sessions):
@@ -110,33 +159,92 @@ def build_record(day, pc, daily, sessions):
     return record
 
 
+def is_number(value):
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def require(condition, day, message):
+    if not condition:
+        raise ValueError(f"{day}：{message}")
+
+
 def validate(record):
-    """あり得ない値は公開せず停止する。"""
+    """構造と値を確かめ、あり得ないレコードは公開せず停止する。
+
+    新しく作ったレコードにも、data/days/ に保存済みのレコードにも同じ検証を通す。
+    想定外の項目も拒否する（アプリ名と時間以外がいつのまにか混ざるのを防ぐ）。
+    """
+    if not isinstance(record, dict) or not isinstance(record.get("date"), str):
+        raise ValueError("日付のないレコードがあります")
     day = record["date"]
-    sleep, pc = record["sleep"], record["pc"]
-    lower, upper, in_bed = sleep.get("lower"), sleep.get("upper"), sleep.get("in_bed")
-    for name, value in (("下限", lower), ("上限", upper), ("就床経過", in_bed)):
-        if value is not None and not 0 <= value <= 1440:
-            raise ValueError(f"{day}：睡眠の{name}が0〜1440分の範囲外です（{value}）")
-    if lower is not None and upper is not None and lower > upper:
-        raise ValueError(f"{day}：睡眠の下限（{lower}）が上限（{upper}）を超えています")
+    try:
+        valid_date = date.fromisoformat(day).isoformat() == day
+    except ValueError:
+        valid_date = False
+    require(valid_date, day, "日付が YYYY-MM-DD 形式ではありません")
+    require(set(record) <= RECORD_KEYS and {"sleep", "pc"} <= set(record), day, "レコードの項目が想定と違います")
+    sleep, pc, steps = record["sleep"], record["pc"], record.get("steps")
+    require(isinstance(sleep, dict) and isinstance(pc, dict), day, "睡眠またはPCの形式が不正です")
+    require(steps is None or (is_number(steps) and 0 <= steps <= 200000), day, f"歩数が不正です（{steps!r}）")
+    warnings = record.get("warnings", [])
+    require(isinstance(warnings, list) and all(isinstance(item, str) for item in warnings), day, "注意書きの形式が不正です")
+
+    require(set(sleep) <= {"state", "segments", *SLEEP_NUMBERS, *SLEEP_TEXTS}, day, "睡眠の項目が想定と違います")
+    require(sleep.get("state") in SLEEP_STATE_VALUES, day, f"睡眠の状態が不正です（{sleep.get('state')!r}）")
+    for key in SLEEP_NUMBERS:
+        value = sleep.get(key)
+        require(value is None or (is_number(value) and 0 <= value <= 1440), day,
+                f"睡眠の {key} が0〜1440分の範囲外です（{value!r}）")
+    for key in SLEEP_TEXTS:
+        require(sleep.get(key) is None or isinstance(sleep[key], str), day, f"睡眠の {key} が文字列ではありません")
+    lower, upper = sleep.get("lower"), sleep.get("upper")
+    require(lower is None or upper is None or lower <= upper, day, f"睡眠の下限（{lower}）が上限（{upper}）を超えています")
+    require(isinstance(sleep.get("segments"), list), day, "睡眠区間の形式が不正です")
     previous = 0
-    for a, b, kind in sleep["segments"]:
-        if not (previous <= a < b <= 1440) or kind not in ("s", "u"):
-            raise ValueError(f"{day}：睡眠区間が不正です（{a}〜{b}）")
-        previous = b
+    for segment in sleep["segments"]:
+        require(isinstance(segment, list) and len(segment) == 3 and is_number(segment[0]) and is_number(segment[1])
+                and previous <= segment[0] < segment[1] <= 1440 and segment[2] in ("s", "u"),
+                day, f"睡眠区間が不正です（{segment!r}）")
+        previous = segment[1]
+
+    require(pc.get("state") in PC_STATE_VALUES, day, f"PCの状態が不正です（{pc.get('state')!r}）")
     if pc["state"] == "missing":
+        require(pc == {"state": "missing", "segments": []}, day, "未取得のPCレコードに値が入っています")
         return
-    for name in ("active", "not_afk", "afk", "unknown"):
-        if not 0 <= pc[name] <= 86400:
-            raise ValueError(f"{day}：PCの{name}が0〜86400秒の範囲外です（{pc[name]}）")
-    if pc["active"] > pc["not_afk"] + 1:
-        raise ValueError(f"{day}：PC稼働判定がnot-afk時間を超えています")
+    require(set(pc) == PC_KEYS, day, "PCの項目が想定と違います")
+    for name in PC_TOTALS:
+        require(is_number(pc[name]) and 0 <= pc[name] <= 86400, day, f"PCの{name}が0〜86400秒の範囲外です（{pc[name]!r}）")
+    require(pc["active"] <= pc["not_afk"] + 1, day, "PC稼働判定がnot-afk時間を超えています")
+    require(isinstance(pc["hours"], list) and len(pc["hours"]) == 24
+            and all(is_number(value) and 0 <= value <= 3601 for value in pc["hours"]), day, "PCの時間帯別の値が不正です")
+    apps, other = pc["apps"], pc["apps_other"]
+    require(isinstance(apps, list) and len(apps) <= MAX_APPS_PER_DAY, day, "PCのアプリ一覧が不正です")
+    for app in apps:
+        require(isinstance(app, dict) and set(app) == {"name", "seconds"} and isinstance(app["name"], str)
+                and is_number(app["seconds"]) and 0 <= app["seconds"] <= 86400, day, "PCのアプリの形式が不正です")
+    require(isinstance(other, dict) and set(other) == {"count", "seconds"} and is_number(other["count"])
+            and other["count"] >= 0 and is_number(other["seconds"]) and 0 <= other["seconds"] <= 86400,
+            day, "PCの「ほか」の形式が不正です")
+    require(isinstance(pc["segments"], list), day, "PC区間の形式が不正です")
     previous = 0.0
-    for a, b in pc["segments"]:
-        if not (previous <= a <= b <= 1440):
-            raise ValueError(f"{day}：PC区間が不正です（{a}〜{b}）")
-        previous = b
+    for segment in pc["segments"]:   # 旧形式は [開始, 終了]、現行は [開始, 終了, うち稼働]
+        require(isinstance(segment, list) and len(segment) in (2, 3) and all(is_number(value) for value in segment)
+                and previous <= segment[0] <= segment[1] <= 1440, day, f"PC区間が不正です（{segment!r}）")
+        require(len(segment) == 2 or 0 <= segment[2] <= segment[1] - segment[0] + 0.2, day,
+                f"PC区間の稼働分が区間の長さを超えています（{segment!r}）")
+        previous = segment[1]
+
+
+def validate_dataset(records, today, start=None):
+    """公開する全レコードを検証する。完了した日（今日より前）だけ、同じ日は1件だけ、開始日以降だけ。"""
+    seen = set()
+    for record in records:
+        validate(record)
+        day = record["date"]
+        require(day not in seen, day, "同じ日付のレコードが複数あります")
+        require(day < today.isoformat(), day, "まだ終わっていない日（今日以降）のレコードです")
+        require(start is None or day >= start.isoformat(), day, "公開開始日より前のレコードです")
+        seen.add(day)
 
 
 def previous_days(today, count):

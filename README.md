@@ -60,16 +60,25 @@ Notion API（健康記録・睡眠セッション） ─────────
 | 公開される内容だけ確認 | `.\.venv\Scripts\python.exe -X utf8 -m pipeline.deploy --dry-run` |
 | 公開 | `.\.venv\Scripts\python.exe -X utf8 -m pipeline.deploy` |
 | ビルドと公開をまとめて実行 | `.\.venv\Scripts\python.exe -X utf8 -m pipeline.daily` |
-| 合成データで画面だけ確認 | `.\.venv\Scripts\python.exe -X utf8 -m pipeline.build --sample` |
+| 合成データで画面だけ確認（`dist-sample/` へ出力） | `.\.venv\Scripts\python.exe -X utf8 -m pipeline.build --sample` |
 | テスト | `.\.venv\Scripts\python.exe -X utf8 -m unittest discover -s tests` |
 
-画面をこのPCで確認するときは、ビルド後に次を実行して `http://127.0.0.1:8765/` を開きます。
+画面をこのPCで確認するときは、ビルド後に次を実行して `http://127.0.0.1:8765/` を開きます（合成データを見るときは `dist` を `dist-sample` に変えます）。
 
 ```powershell
 .\.venv\Scripts\python.exe -m http.server 8765 --bind 127.0.0.1 --directory dist
 ```
 
-合成データの合言葉は `pipeline/sample.py` の `PASSPHRASE` にあります。合成データは公開できません（`pipeline.deploy` が止めます）。
+合成データの合言葉は `pipeline/sample.py` の `PASSPHRASE` にあります。合成データは `dist-sample/` に出力され、公開用の `dist/` には入りません。
+
+### 公開前の検査
+
+`pipeline.deploy` は `dist/` を作業用フォルダへ写し、その写しを検査してから、同じ写しを送信します。次のどれかに当てはまると送信しません（`--dry-run` でも同じ検査をします）。
+
+- ファイルが `index.html`、`app.js`、`style.css`、`robots.txt`、`.nojekyll`、`data.enc.json` の6つと一致しない（余分なファイルやフォルダがある、足りない）
+- 画面のファイルが `site/` と違う（`site/` を直したあとビルドしていない）
+- `data.enc.json` が所定の暗号形式でない（暗号化されていないJSONを含む）、または合成データである
+- `.env` の合言葉で復号できない、または中の記録が検証を通らない（未来の日付、重複、範囲外の値など）
 
 ## 画面の見方
 
@@ -82,15 +91,22 @@ Notion API（健康記録・睡眠セッション） ─────────
 
 - 1日は日本時間の0時から24時。日付をまたぐ睡眠は、その日に入る分だけを数えます。
 - 睡眠時間は Notion「健康記録」の暦日集計（下限・上限）をそのまま使い、このプログラムでは計算し直しません。下限と上限が違う日は「◯時間〜◯時間」と幅で表示します。
-- 「記録なし」「未同期」「未取得」は0ではなく不明として表示します。推測で埋めません。
-- PCの時間は ActivityWatch が「操作中」と判定した時間（not-afk とウィンドウ記録の重なり）です。操作中の判定が6時間以上途切れなかった日は、機器の影響の可能性があるため「参考値」と表示します。
+- 「記録なし」「未同期」「未取得」「一部欠測」は0ではなく不明として表示します。推測で埋めません。睡眠の下限と上限の片方しかない日は「一部欠測」として、残っている数値を使いません。
+- PCの時間は ActivityWatch が「操作中」と判定した時間（not-afk とウィンドウ記録の重なり）です。操作中の判定が6時間以上途切れなかった日は、機器の影響の可能性があるため「参考値」と表示します。操作中なのにアプリの記録が10分を超えて欠けている日は「一部欠測」として「◯時間以上」と表示し、平均とグラフには入れません。
 - PCについて扱うのはアプリ名と時間だけです。ウィンドウタイトル、URL、入力内容は扱いません。
 
 ## 合言葉について
 
 - 合言葉を知っている人は全員が記録を読めます。共有する相手にだけ、URLとは別の手段で伝えてください。
 - 暗号文は公開されるため、短い合言葉は総当たりで破られる可能性があります。12文字以上の推測されにくい言葉にしてください。
+- 画面で「この端末に合言葉を記憶する」を選ばなければ、合言葉は端末に保存されません。ページを再読み込みすると入力し直しになります。
 - 合言葉を変えるときは、`.env` の `SITE_PASSPHRASE` を書き換えてから `pipeline.daily` を実行します。`gh-pages` は毎回履歴のない1コミットで置き換えるので、古い合言葉の暗号文はブランチに残りません。
+- ただし、合言葉を変えても「すでに誰かが取得した古い暗号文」は古い合言葉で読めます。GitHub 側にも古いコミットがしばらく残ることがあります（[GitHub の説明](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/removing-sensitive-data-from-a-repository#about-sensitive-data-exposure)）。合言葉の変更で守れるのは、変更後に公開する記録だけです。
+
+## 検索エンジンについて
+
+- 検索に載せない設定として効いているのは、`index.html` の `noindex` です。
+- `robots.txt` も置いていますが、このサイトは `https://<ユーザー名>.github.io/<リポジトリ名>/` という下の階層にあるため、検索エンジンは読みません（`robots.txt` はサイトの最上位にあるものだけが使われます。[Google の説明](https://developers.google.com/crawling/docs/robots-txt/robots-txt-spec)）。`noindex` を外さないでください。
 
 ## うまくいかないとき
 
@@ -98,5 +114,7 @@ Notion API（健康記録・睡眠セッション） ─────────
 - ビルドに失敗した日は公開を行いません。公開中のデータは前回のまま残ります。
 - 「ActivityWatch の集計に失敗」：ActivityWatch が起動しているか確認します。
 - 「Notion の読み取りに失敗」：`.env` のシークレットと、データベースがインテグレーションへ共有されているかを確認します。
+- 「Notion「…」の列「…」を読めません」：Notion 側で列の名前か型が変わっています。空の値として取り込むと保存済みの記録を上書きしてしまうため、止めています。列を元に戻すか、`pipeline/collect_sleep.py` の列名を合わせます。
+- 「保存済みレコード … 」「まだ終わっていない日のレコードです」など：`data\days\` のファイルに問題があります。表示されたファイルを確認します。
 - 公開する最初の日は `.env` の `START_DATE` で決めます。それより前の日は、保存済みのレコードがあっても公開しません。
 - PCの電源が入っていなかった日は更新されません。次に実行したとき、直近14日ぶんがまとめて補われます。
