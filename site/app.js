@@ -126,6 +126,65 @@
     });
     return axis;
   }
+  /* 24時間の文字盤：0時を上にした時計回り。外周が睡眠、内周がPC。 */
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  function svg(tag, attrs, cls) {
+    const node = document.createElementNS(SVG_NS, tag);
+    for (const [key, value] of Object.entries(attrs || {})) node.setAttribute(key, value);
+    if (cls) node.setAttribute('class', cls);
+    return node;
+  }
+  function polar(r, min) {
+    const angle = (min / 1440) * Math.PI * 2 - Math.PI / 2;
+    return [120 + r * Math.cos(angle), 120 + r * Math.sin(angle)];
+  }
+  function arc(r, a, b, cls, tip) {
+    let node;
+    if (b - a >= 1439.5) {
+      node = svg('circle', { cx: 120, cy: 120, r }, cls);
+    } else {
+      const [x1, y1] = polar(r, a);
+      const [x2, y2] = polar(r, b);
+      const large = b - a > 720 ? 1 : 0;
+      node = svg('path', { d: `M${x1.toFixed(2)} ${y1.toFixed(2)}A${r} ${r} 0 ${large} 1 ${x2.toFixed(2)} ${y2.toFixed(2)}` }, cls);
+    }
+    node.dataset.tip = tip;
+    return node;
+  }
+  function dial(rec) {
+    const root = svg('svg', { viewBox: '0 0 240 240', role: 'img' }, 'dial');
+    const defs = svg('defs');
+    const hatch = svg('pattern', { id: 'dial-hatch', width: 5, height: 5, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' });
+    hatch.append(svg('rect', { width: 5, height: 5 }, 'hatch-bg'), svg('rect', { width: 1.4, height: 5 }, 'hatch-line'));
+    defs.append(hatch);
+    root.append(defs);
+    root.append(svg('circle', { cx: 120, cy: 120, r: 86 }, 'dial-track track-sleep'), svg('circle', { cx: 120, cy: 120, r: 60 }, 'dial-track track-pc'));
+    root.append(svg('circle', { cx: 120, cy: 120, r: 104 }, 'dial-ticks'));
+    for (const hour of [0, 6, 12, 18]) {
+      const [x1, y1] = polar(98, hour * 60);
+      const [x2, y2] = polar(110, hour * 60);
+      root.append(svg('line', { x1, y1, x2, y2 }, 'dial-major'));
+      const [tx, ty] = polar(124 - 6, hour * 60);
+      const label = svg('text', { x: tx.toFixed(1), y: ty.toFixed(1) }, `dial-hour h${hour}`);
+      label.textContent = String(hour);
+      root.append(label);
+    }
+    const spoken = [];
+    for (const [a, b, kind] of rec.sleep.segments) {
+      const name = kind === 'u' ? '睡眠（実睡眠は不明）' : '睡眠';
+      root.append(arc(86, a, b, kind === 'u' ? 'arc arc-soft' : 'arc arc-sleep', `${name}
+${clock(a)}〜${clock(b)}（${hm(b - a)}）`));
+      spoken.push(`${name} ${clock(a)}から${clock(b)}`);
+    }
+    for (const [a, b, active] of rec.pc.segments) {
+      const amount = isNum(active) ? `（うち稼働 ${hmShort(active)}）` : '';
+      root.append(arc(60, a, b, 'arc arc-pc', `PC稼働
+${clock(a)}〜${clock(b)}${amount}`));
+    }
+    if (rec.pc.segments.length) spoken.push(`PC稼働 ${rec.pc.segments.length}区間`);
+    root.setAttribute('aria-label', `0時から24時の文字盤。${spoken.join('、') || '記録された区間はありません'}`);
+    return root;
+  }
   function badge(text, warn) {
     return el('span', warn ? 'badge is-warn' : 'badge', text);
   }
@@ -170,9 +229,7 @@
       if (rec.pc.state === 'caution') pcNote.append(badge('参考値', true));
     }
 
-    const names = el('div', 'lane-names');
-    names.append(el('span', null, '睡眠'), el('span', null, 'PC'));
-    $('day-timeline').replaceChildren(names, lanes(rec), hoursAxis());
+    $('day-dial').replaceChildren(dial(rec));
     renderDetail(rec);
   }
 

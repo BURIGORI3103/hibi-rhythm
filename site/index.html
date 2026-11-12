@@ -15,9 +15,16 @@
 
 <main id="gate" class="gate" hidden>
   <form id="gate-form" class="gate-card" autocomplete="off">
+    <svg class="gate-dial" viewBox="0 0 240 240" aria-hidden="true">
+      <circle class="dial-track track-sleep" cx="120" cy="120" r="86"/>
+      <circle class="dial-track track-pc" cx="120" cy="120" r="60"/>
+      <circle class="dial-ticks" cx="120" cy="120" r="104"/>
+      <circle class="gate-arc gate-arc-sleep" cx="120" cy="120" r="86"/>
+      <circle class="gate-arc gate-arc-pc" cx="120" cy="120" r="60"/>
+    </svg>
     <h1>日々リズム</h1>
     <p class="gate-lead">睡眠とPC利用の記録です。共有された合言葉を入力してください。</p>
-    <label for="pass">合言葉</label>
+    <label for="pass" class="field-label">合言葉</label>
     <input id="pass" name="pass" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" required>
     <label class="check"><input id="show-pass" type="checkbox"> 入力内容を表示する</label>
     <label class="check"><input id="remember" type="checkbox"> この端末に合言葉を記憶する</label>
@@ -44,29 +51,31 @@
 
   <p id="sample-banner" class="banner" hidden>画面確認用の合成データを表示しています。実際の記録ではありません。</p>
 
-  <section class="card" aria-labelledby="day-title">
+  <section class="day" aria-labelledby="day-title">
     <div class="day-nav">
       <button id="prev" type="button" class="nav" aria-label="前の日">‹</button>
       <h2 id="day-title"></h2>
       <button id="next" type="button" class="nav" aria-label="次の日">›</button>
     </div>
-    <div class="tiles">
-      <div class="tile">
-        <div class="tile-label"><span class="key key-sleep"></span>睡眠</div>
-        <div class="tile-value" id="sleep-value"></div>
-        <div class="tile-note" id="sleep-note"></div>
-      </div>
-      <div class="tile">
-        <div class="tile-label"><span class="key key-pc"></span>PC</div>
-        <div class="tile-value" id="pc-value"></div>
-        <div class="tile-note" id="pc-note"></div>
+    <div class="day-body">
+      <div id="day-dial" class="day-dial"></div>
+      <div class="tiles">
+        <div class="tile tile-sleep">
+          <div class="tile-label"><span class="key key-sleep"></span>睡眠</div>
+          <div class="tile-value" id="sleep-value"></div>
+          <div class="tile-note" id="sleep-note"></div>
+        </div>
+        <div class="tile tile-pc">
+          <div class="tile-label"><span class="key key-pc"></span>PC</div>
+          <div class="tile-value" id="pc-value"></div>
+          <div class="tile-note" id="pc-note"></div>
+        </div>
       </div>
     </div>
-    <div id="day-timeline" class="day-timeline"></div>
     <div id="detail" class="detail"></div>
   </section>
 
-  <section class="card" aria-labelledby="rhythm-title">
+  <section class="block" aria-labelledby="rhythm-title">
     <div class="card-head">
       <h2 id="rhythm-title">リズム表</h2>
       <div class="seg" role="group" aria-label="表示期間">
@@ -83,19 +92,19 @@
     <div id="rhythm" class="rhythm"></div>
   </section>
 
-  <section class="card" aria-labelledby="trend-title">
+  <section class="block" aria-labelledby="trend-title">
     <h2 id="trend-title">推移</h2>
     <div id="trend"></div>
   </section>
 
-  <section class="card">
+  <section class="block">
     <details id="table-details">
       <summary>表で見る</summary>
       <div id="table" class="table-wrap"></div>
     </details>
   </section>
 
-  <section class="notes" aria-labelledby="notes-title">
+  <section class="block notes" aria-labelledby="notes-title">
     <h2 id="notes-title">この記録の読み方</h2>
     <ul>
       <li>1日は日本時間の0時から24時です。夜の睡眠は日付をまたぐため、その日の0〜24時に入る分だけを数えています。</li>
