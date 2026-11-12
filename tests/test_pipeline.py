@@ -338,6 +338,34 @@ class NotionParsingTests(unittest.TestCase):
         with self.assertRaises(CollectError):
             parse_daily(pages * 2)
 
+    def test_collects_paginated_health_and_session_rows_with_calendar_totals(self):
+        from io import StringIO
+        from unittest.mock import patch
+        from pipeline.collect_sleep import collect
+
+        day = date(2001, 1, 2)
+        health = self.page(**{**self.blank_daily(day.isoformat()),
+                             "睡眠時間（暦日・下限）（分）": {"type": "number", "number": 50},
+                             "睡眠時間（暦日・上限）（分）": {"type": "number", "number": 70},
+                             "睡眠集計状態": {"type": "select", "select": {"name": "一部不明"}}})
+        stage = self.page(**{"開始日時": {"type": "rich_text", "rich_text": [{"plain_text": "2001-01-01T14:00:00Z"}]},
+                             "終了日時": {"type": "rich_text", "rich_text": [{"plain_text": "2001-01-01T17:00:00Z"}]},
+                             "判定": {"type": "select", "select": {"name": "採用"}}})
+        responses = [
+            {"results": [{**health, "in_trash": True}], "has_more": True, "next_cursor": "synthetic-cursor"},
+            {"results": [health], "has_more": False, "next_cursor": None},
+            {"results": [stage], "has_more": False, "next_cursor": None},
+        ]
+        with patch("pipeline.collect_sleep.urlopen", side_effect=[
+                StringIO(json.dumps(response)) for response in responses]) as request:
+            daily, sessions = collect("synthetic-placeholder", "synthetic-health", "synthetic-session", [day])
+        requests = [call.args[0] for call in request.call_args_list]
+        self.assertTrue(all(item.get_method() == "POST" and item.full_url.endswith("/query") for item in requests))
+        self.assertEqual(json.loads(requests[1].data)["start_cursor"], "synthetic-cursor")
+        record = build_record(day, None, daily[day.isoformat()], sessions)
+        self.assertEqual((record["sleep"]["lower"], record["sleep"]["upper"]), (50, 70))
+        self.assertEqual(record["sleep"]["segments"], [[0, 120, "s"]])
+
     def test_session_rows(self):
         def rich(value):
             return {"type": "rich_text", "rich_text": [{"plain_text": value}]}
