@@ -87,6 +87,24 @@ class PublishStagingTests(unittest.TestCase):
             remove_tree(target)
             self.assertFalse(target.exists())
 
+    def test_missing_backup_keeps_recovery_pending(self):
+        import tempfile
+        from pathlib import Path
+        from pipeline.build import restore_previous
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            staging, target = root / "dist.tmp", root / "dist"
+            (staging / ".previous").mkdir(parents=True)
+            (staging / ".removed").mkdir()
+            target.mkdir()
+            (target / "app.js").write_text("new", encoding="utf-8")
+            pending = staging / ".pending"
+            pending.write_text('{"replace":["app.js"],"existing":["app.js"]}', encoding="utf-8")
+            with self.assertRaisesRegex(OSError, "復元"):
+                restore_previous(staging, target)
+            self.assertTrue(pending.exists())
+
     def test_restart_recovers_after_process_exit_and_blocks_deploy_snapshot(self):
         import subprocess
         import sys

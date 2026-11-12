@@ -158,13 +158,18 @@ def restore_previous(staging, target):
             for key in ("replace", "existing")):
         raise ValueError("出力の復元情報が壊れています")
     previous = staging / ".previous"
-    for name in manifest["replace"]:
-        if (staging / name).exists():
-            continue  # まだ置き換えていない
+    existing = set(manifest["existing"])
+    replaced = [name for name in manifest["replace"] if not (staging / name).exists()]
+    for name in existing.intersection(replaced):
         saved = previous / name
-        if saved.exists() or saved.is_symlink():
-            os.replace(saved, target / name)
-        elif name not in manifest["existing"]:
+        if saved.is_symlink() or not saved.is_file():
+            raise OSError(f"{name} の復元用ファイルが見つかりません。復元待ちの出力を保護しました")
+    for name in replaced:
+        if name in existing:
+            restored = staging / ".restore"
+            shutil.copyfile(previous / name, restored)
+            os.replace(restored, target / name)
+        else:
             (target / name).unlink(missing_ok=True)
     for saved in (staging / ".removed").iterdir():
         os.replace(saved, target / saved.name)
@@ -180,7 +185,9 @@ def publish_staging(staging, target):
     previous.mkdir()
     removed.mkdir()
     for name in existing.keys() & set(names):
-        shutil.copy2(existing[name], previous / name, follow_symlinks=False)
+        if existing[name].is_symlink() or not existing[name].is_file():
+            raise OSError(f"出力先の {name} が通常のファイルではありません")
+        shutil.copy2(existing[name], previous / name)
     pending = staging / ".pending"
     atomic_write(pending, json.dumps({"replace": names, "existing": list(existing)}) + "\n")
     try:

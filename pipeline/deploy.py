@@ -27,11 +27,14 @@ from .merge import validate_dataset
 BRANCH = "gh-pages"
 
 
-def git(*args, cwd):
-    result = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, encoding="utf-8")
+def git(*args, cwd, raw=False):
+    result = subprocess.run(["git", *args], cwd=cwd, capture_output=True)
     if result.returncode != 0:
-        raise RuntimeError(f"git {args[0]} に失敗：{result.stderr.strip().splitlines()[-1] if result.stderr.strip() else '原因不明'}")
-    return result.stdout.strip()
+        if args[0] == "push":
+            raise RuntimeError("git push に失敗しました。認証、ネットワーク、リモートの設定を確認してください")
+        reason = result.stderr.decode("utf-8", errors="replace").strip().splitlines()
+        raise RuntimeError(f"git {args[0]} に失敗：{reason[-1] if reason else '原因不明'}")
+    return result.stdout if raw else result.stdout.decode("utf-8").strip()
 
 
 def publish_entries(folder):
@@ -77,15 +80,14 @@ def inspect(folder, passphrase, today, start=None, site=SITE_DIR):
 
 
 def copy_dist(target, work):
-    """ビルド完了済みの出力だけを公開用の作業フォルダに写す。"""
-    with output_lock(target):
-        pending = target.with_name(target.name + ".tmp") / ".pending"
-        if pending.exists():
-            raise RuntimeError("前回のビルドが途中で中断しました。先にビルドし直してください")
-        if not (target / DATA_FILE).exists():
-            raise RuntimeError(f"dist/{DATA_FILE} がありません。先に python -m pipeline.build を実行してください")
-        publish_entries(target)
-        shutil.copytree(target, work, symlinks=True)
+    """呼び出し元がロックを保持した状態で、完了済みの出力だけを写す。"""
+    pending = target.with_name(target.name + ".tmp") / ".pending"
+    if pending.exists():
+        raise RuntimeError("前回のビルドが途中で中断しました。先にビルドし直してください")
+    if not (target / DATA_FILE).exists():
+        raise RuntimeError(f"dist/{DATA_FILE} がありません。先に python -m pipeline.build を実行してください")
+    publish_entries(target)
+    shutil.copytree(target, work, symlinks=True)
 
 
 def main(argv=None):
@@ -94,25 +96,33 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         env = load_env()
-        remote = git("remote", "get-url", "origin", cwd=ROOT)
         name = git("config", "user.name", cwd=ROOT)
         email = git("config", "user.email", cwd=ROOT)
-        with tempfile.TemporaryDirectory(prefix="hibi-deploy-") as folder:
+        with output_lock(DIST_DIR), tempfile.TemporaryDirectory(prefix="hibi-deploy-") as folder:
             work = Path(folder) / "site"
             copy_dist(DIST_DIR, work)
             count = inspect(work, env.get("SITE_PASSPHRASE", ""), datetime.now(JST).date(), start_date(env))
-            git("init", "--quiet", "--initial-branch", BRANCH, cwd=work)
-            git("add", "--all", cwd=work)
+            verified = {file: (work / file).read_bytes() for file in sorted(PUBLISH_FILES)}
+            git("init", "--quiet", "--template=", "--initial-branch", BRANCH, cwd=work)
+            git("config", "--local", "core.hooksPath", ".git/disabled-hooks", cwd=work)
+            for file in verified:
+                # Git の改行変換や属性フィルターを通さず、検査したファイルをステージする。
+                object_id = git("hash-object", "-w", "--no-filters", "--", file, cwd=work)
+                git("update-index", "--add", "--cacheinfo", f"100644,{object_id},{file}", cwd=work)
             message = f"公開データを更新 {datetime.now(JST).isoformat(timespec='minutes')}"
             git("-c", f"user.name={name}", "-c", f"user.email={email}", "commit", "--quiet", "-m", message, cwd=work)
-            files = git("ls-files", cwd=work).splitlines()
+            files = git("ls-tree", "-r", "--name-only", "HEAD", cwd=work).splitlines()
             if set(files) != PUBLISH_FILES or len(files) != len(PUBLISH_FILES):
                 raise RuntimeError("コミットされるファイルが、公開してよいファイルの一覧と一致しません")
+            for file, expected in verified.items():
+                if git("cat-file", "blob", f"HEAD:{file}", cwd=work, raw=True) != expected:
+                    raise RuntimeError(f"コミットの {file} が検査時の内容と一致しません")
             if args.dry_run:
-                print(f"確認のみ（未送信）：検査を通過。{count}日分、{len(files)}ファイル → {remote} の {BRANCH}")
+                print(f"確認のみ（未送信）：検査を通過。{count}日分、{len(files)}ファイル → {BRANCH}")
                 for file in files:
                     print(f"  {file}")
                 return 0
+            remote = git("remote", "get-url", "origin", cwd=ROOT)
             git("push", "--force", remote, f"{BRANCH}:{BRANCH}", cwd=work)
     except (RuntimeError, OSError) as error:
         print(f"中断：{error}（公開中のサイトは変更していません）", file=sys.stderr)
