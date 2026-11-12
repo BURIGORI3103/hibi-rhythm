@@ -86,6 +86,7 @@
     const kind = pcKind(pc);
     if (kind === 'missing') return '未取得';
     if (kind === 'none') return '記録なし';
+    if (kind === 'partial' && pc.active === 0) return '一部欠測';
     return kind === 'partial' ? `${format(pc.active / 60)}以上` : format(pc.active / 60);
   }
   const pcMark = (pc) => ({ caution: '参考値', partial: '一部欠測' }[pcKind(pc)] || '');
@@ -216,10 +217,15 @@ ${clock(a)}〜${clock(b)}${amount}`));
     const minutes = pcMinutes(rec.pc);
     const kind = pcKind(rec.pc);
     pcValue.replaceChildren();
-    pcValue.classList.toggle('is-unknown', minutes == null && kind !== 'partial');
+    pcValue.classList.toggle('is-unknown', minutes == null && (kind !== 'partial' || rec.pc.active === 0));
     if (kind === 'partial') {
-      pcValue.append(durNode(rec.pc.active / 60), el('small', null, '以上'));
-      pcNote.replaceChildren(el('span', null, '記録できた分だけの時間'), badge('一部欠測', true));
+      if (rec.pc.active > 0) {
+        pcValue.append(durNode(rec.pc.active / 60), el('small', null, '以上'));
+        pcNote.replaceChildren(el('span', null, '操作中とアプリの両方が記録された時間'), badge('一部欠測', true));
+      } else {
+        pcValue.textContent = pcText(rec.pc);
+        pcNote.replaceChildren(el('span', null, '操作中とアプリの両方を確認できた時間がありません'));
+      }
     } else if (minutes == null) {
       pcValue.textContent = pcText(rec.pc);
       pcNote.replaceChildren(el('span', null, kind === 'none' ? 'PCの記録がない日です' : 'まだ取り込まれていません'));
@@ -298,7 +304,10 @@ ${clock(a)}〜${clock(b)}${amount}`));
       caveat.append(el('p', null, `PC：操作中の判定が${hm(pc.longest_not_afk / 60)}途切れずに続いた区間があります。機器の影響で席を離れていた時間も含まれている可能性があるため、参考値としています。`));
     }
     if (pcKind(pc) === 'partial') {
-      caveat.append(el('p', null, `PC：操作中と判定された時間のうち約${hm((pc.not_afk - pc.active) / 60)}は、使っていたアプリの記録が欠けています。実際の時間は表示より長いため「以上」と表示し、平均には含めていません。`));
+      const gaps = [];
+      if (pc.not_afk - pc.active > 0) gaps.push(`アプリの記録がない操作中判定 約${hm((pc.not_afk - pc.active) / 60)}`);
+      if (pc.window_unknown > 0) gaps.push(`操作中か離席かの判定がないアプリ記録 約${hm(pc.window_unknown / 60)}`);
+      caveat.append(el('p', null, gaps.join('、') + '。この日のPC時間は平均に含めていません。'));
     }
     for (const warning of rec.warnings || []) caveat.append(el('p', null, `確認中：${warning}`));
     if (sleep.note) {

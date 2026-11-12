@@ -17,6 +17,7 @@ NOTION_VERSION = "2026-03-11"
 def query_all(data_source_id, token):
     """データソースの全行をページングして取得する。"""
     rows, cursor = [], None
+    seen_cursors = set()
     while True:
         body = {"page_size": 100}
         if cursor:
@@ -37,11 +38,20 @@ def query_all(data_source_id, token):
             raise CollectError(f"Notion の読み取りに失敗：{hints.get(error.code, f'HTTP {error.code}')}") from None
         except URLError as error:
             raise CollectError(f"Notion に接続できません：{error.reason}") from None
+        except ValueError:
+            raise CollectError("Notion の読み取り結果を JSON として読めません") from None
+        if (not isinstance(payload, dict) or type(payload.get("has_more")) is not bool
+                or not isinstance(payload.get("results"), list)
+                or any(not isinstance(page, dict) for page in payload["results"])):
+            raise CollectError("Notion の読み取り結果の形式が想定と違います")
         rows.extend(page for page in payload["results"]
                     if not page.get("in_trash") and not page.get("archived"))
-        if not payload.get("has_more"):
+        if not payload["has_more"]:
             return rows
-        cursor = payload["next_cursor"]
+        cursor = payload.get("next_cursor")
+        if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
+            raise CollectError("Notion のページ取得が進まないため中断しました")
+        seen_cursors.add(cursor)
 
 
 def text(prop):

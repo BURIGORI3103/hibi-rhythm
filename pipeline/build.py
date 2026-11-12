@@ -8,6 +8,7 @@
 """
 
 import argparse
+from contextlib import contextmanager
 from datetime import date, datetime
 import json
 import os
@@ -66,23 +67,30 @@ def load_saved(folder=DAYS_DIR):
     return records
 
 
-def collect_records(days, env):
+def collect_records(days, env, today=None):
     """実データを収集して data/days/ に保存し、保存済みの全日を返す。"""
+    today = today or datetime.now(JST).date()
+    start = start_date(env)
+    saved = within(load_saved(DAYS_DIR), start)
+    validate_dataset(saved, today, start)
     pc = collect_pc.collect(days, env.get("ACTIVITYWATCH_PROJECT") or DEFAULT_ACTIVITYWATCH_PROJECT)
     daily, sessions = collect_sleep.collect(env.get("NOTION_TOKEN"), env.get("NOTION_HEALTH_DATA_SOURCE_ID"),
                                             env.get("NOTION_SLEEP_SESSION_DATA_SOURCE_ID"), days)
     rebuilt = [build_record(day, pc.get(day.isoformat()), daily.get(day.isoformat()), sessions)
                for day in tqdm(days, desc="日別レコードを統合", unit="日", file=sys.stderr)]
+    validate_dataset(rebuilt, today, start)
+    records = {record["date"]: record for record in saved}
     for record in rebuilt:
         atomic_write(DAYS_DIR / f"{record['date']}.json", json.dumps(record, ensure_ascii=False, indent=1) + "\n")
-    return within(load_saved(), start_date(env)), rebuilt
+        records[record["date"]] = record
+    return list(records.values()), rebuilt
 
 
 def write_dist(records, passphrase, is_sample, today, start=None):
     """site/ の静的ファイルと暗号化データを出力する。完成してから差し替える。
 
     実データは dist/、合成データは dist-sample/ へ出す。公開処理が読むのは dist/ だけなので、
-    画面確認用のビルドが公開用の一式を上書きすることはない。
+    画面確認用のビルドが公開用の一式を上書きすることはない。呼び出し元が出力先をロックする。
     """
     validate_dataset(records, today, start)   # 今回作った日だけでなく、保存済みの日も含めた全件
     dataset = {"schema": SCHEMA_VERSION, "timezone": TIMEZONE_NAME, "sample": is_sample,
@@ -97,8 +105,11 @@ def write_dist(records, passphrase, is_sample, today, start=None):
     staging = target.with_name(target.name + ".tmp")
     remove_tree(staging)
     staging.mkdir()
-    for name in STATIC_FILES:   # 公開してよいファイルだけを写す。site/ にほかのファイルがあっても持ち出さない
-        shutil.copyfile(SITE_DIR / name, staging / name)
+    for name in STATIC_FILES:   # 公開してよいファイルだけを写す
+        source = SITE_DIR / name
+        if source.is_symlink() or not source.is_file():
+            raise OSError(f"site/{name} が通常のファイルではありません")
+        shutil.copyfile(source, staging / name)
     (staging / ".nojekyll").write_text("", encoding="utf-8")
     atomic_write(staging / DATA_FILE, json.dumps(envelope, separators=(",", ":")) + "\n")
     publish_staging(staging, target)
@@ -114,19 +125,73 @@ def remove_tree(path):
         shutil.rmtree(path, onexc=retry_writable)
 
 
-def publish_staging(staging, target):
-    """staging の中身を target へ1ファイルずつ置き換える。
+@contextmanager
+def output_lock(target):
+    """ビルドと公開用コピーを排他し、強制終了時はOSにロックを解放させる。"""
+    lock_path = target.with_name(target.name + ".lock")
+    with lock_path.open("a+b") as lock:
+        try:
+            if os.name == "nt":
+                import msvcrt
+                lock.seek(0)
+                msvcrt.locking(lock.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise OSError(f"{target.name}/ を更新または確認している処理があります") from error
+        yield
 
-    target フォルダ自体は消さない。プレビュー用サーバーなどがフォルダを開いていると
-    Windows では削除に失敗し、中身だけが消えた状態で止まるため。
-    """
+
+def restore_previous(staging, target):
+    """未完了の置き換えを元に戻す。復元自体が中断しても再試行できる。"""
+    if any(path.is_symlink() or path.is_junction() for path in (staging, target)):
+        raise OSError("出力先または一時フォルダがリンクです")
+    pending = staging / ".pending"
+    if not pending.exists():
+        return
+    manifest = json.loads(pending.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict) or any(
+            not isinstance(manifest.get(key), list) or
+            any(not isinstance(name, str) or not name or name in (".", "..") or
+                any(char in name for char in "/\\:") for name in manifest[key])
+            for key in ("replace", "existing")):
+        raise ValueError("出力の復元情報が壊れています")
+    previous = staging / ".previous"
+    for name in manifest["replace"]:
+        if (staging / name).exists():
+            continue  # まだ置き換えていない
+        saved = previous / name
+        if saved.exists() or saved.is_symlink():
+            os.replace(saved, target / name)
+        elif name not in manifest["existing"]:
+            (target / name).unlink(missing_ok=True)
+    for saved in (staging / ".removed").iterdir():
+        os.replace(saved, target / saved.name)
+    pending.unlink()
+
+
+def publish_staging(staging, target):
+    """target フォルダを残し、置き換え途中で失敗した場合は旧版を復元する。"""
     target.mkdir(parents=True, exist_ok=True)
     names = sorted(path.name for path in staging.iterdir())
-    for name in names:
-        os.replace(staging / name, target / name)
-    for path in target.iterdir():
-        if path.name not in names:
-            remove_tree(path) if path.is_dir() else path.unlink()
+    existing = {path.name: path for path in target.iterdir()}
+    previous, removed = staging / ".previous", staging / ".removed"
+    previous.mkdir()
+    removed.mkdir()
+    for name in existing.keys() & set(names):
+        shutil.copy2(existing[name], previous / name, follow_symlinks=False)
+    pending = staging / ".pending"
+    atomic_write(pending, json.dumps({"replace": names, "existing": list(existing)}) + "\n")
+    try:
+        for name in names:
+            os.replace(staging / name, target / name)
+        for name in existing.keys() - set(names):
+            os.replace(existing[name], removed / name)
+        pending.unlink()
+    except (OSError, KeyboardInterrupt):
+        restore_previous(staging, target)
+        raise
     remove_tree(staging)
 
 
@@ -141,6 +206,8 @@ def describe(record):
         sleep_text = f"{span[0]}〜{span[1]}分"
     if pc["state"] in ("missing", "none"):
         pc_text = "未取得" if pc["state"] == "missing" else "記録なし"
+    elif pc["state"] == "partial" and pc["active"] == 0:
+        pc_text = "一部欠測"
     else:
         pc_text = f"{pc['active'] // 60}分" + {"caution": "（参考値）", "partial": "以上（一部欠測）"}.get(pc["state"], "")
     return f"  {record['date']}  睡眠 {sleep_text} ／ PC {pc_text}"
@@ -154,27 +221,27 @@ def main(argv=None):
     args = parser.parse_args(argv)
     today = datetime.now(JST).date()
     start = None
-    target = "dist-sample/" if args.sample else "dist/"
+    output = SAMPLE_DIST_DIR if args.sample else DIST_DIR
+    target = output.name + "/"
     try:
-        if args.sample:
-            records, rebuilt, passphrase = sample.generate(today), [], sample.PASSPHRASE
-        else:
-            env = load_env()
-            passphrase = env.get("SITE_PASSPHRASE", "")
-            if len(encrypt.normalize(passphrase)) < MIN_PASSPHRASE_LENGTH:
-                raise CollectError(f".env の SITE_PASSPHRASE を{MIN_PASSPHRASE_LENGTH}文字以上で設定してください")
-            if args.since:
-                if args.since >= today:
-                    raise CollectError("--since には過去の日付を指定してください")
-                days = previous_days(today, (today - args.since).days)
+        with output_lock(output):
+            restore_previous(output.with_name(output.name + ".tmp"), output)
+            if args.sample:
+                records, rebuilt, passphrase = sample.generate(today), [], sample.PASSPHRASE
             else:
-                days = previous_days(today, max(args.days, 1))
-            start = start_date(env)
-            days = [day for day in days if start is None or day >= start]
-            records, rebuilt = collect_records(days, env)
-        size = write_dist(records, passphrase, args.sample, today, start)
+                env = load_env()
+                passphrase = env.get("SITE_PASSPHRASE", "")
+                if len(encrypt.normalize(passphrase)) < MIN_PASSPHRASE_LENGTH:
+                    raise CollectError(f".env の SITE_PASSPHRASE を{MIN_PASSPHRASE_LENGTH}文字以上で設定してください")
+                if args.since and args.since >= today:
+                    raise CollectError("--since には過去の日付を指定してください")
+                count = (today - args.since).days if args.since else max(args.days, 1)
+                start = start_date(env)
+                days = [day for day in previous_days(today, count) if start is None or day >= start]
+                records, rebuilt = collect_records(days, env, today)
+            size = write_dist(records, passphrase, args.sample, today, start)
     except (CollectError, ValueError) as error:
-        print(f"中断：{error}（{target} は変更していません）", file=sys.stderr)
+        print(f"中断：{error}（{target} に新版は出力していません）", file=sys.stderr)
         return 1
     except OSError as error:
         print(f"中断：ファイルを書き込めませんでした：{error}（{target} を確認してからビルドし直してください）", file=sys.stderr)

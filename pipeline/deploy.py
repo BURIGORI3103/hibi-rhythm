@@ -19,7 +19,7 @@ import sys
 import tempfile
 
 from . import encrypt
-from .build import start_date
+from .build import output_lock, start_date
 from .config import (DATA_FILE, DIST_DIR, JST, PUBLISH_FILES, ROOT, SCHEMA_VERSION, SITE_DIR, STATIC_FILES,
                      TIMEZONE_NAME, load_env)
 from .merge import validate_dataset
@@ -34,14 +34,10 @@ def git(*args, cwd):
     return result.stdout.strip()
 
 
-def inspect(folder, passphrase, today, start=None, site=SITE_DIR):
-    """folder が「公開してよい一式」であることを確かめる。そうでなければ RuntimeError。
-
-    1. ファイルは許可リストと完全に一致する（余分も不足も不可。フォルダやリンクも不可）
-    2. 画面のファイルは site/ と1バイトも違わない
-    3. データは所定の暗号形式で、合成データではない（平文のJSONはここで弾かれる）
-    4. いまの合言葉で復号でき、中身の全レコードが検証を通る
-    """
+def publish_entries(folder):
+    """公開対象の正規ファイルを列挙する。リンクや余分な項目を写さない。"""
+    if folder.is_symlink() or folder.is_junction():
+        raise RuntimeError("公開出力フォルダがリンクです")
     entries = {path.name: path for path in folder.iterdir()}
     odd = sorted(name for name, path in entries.items() if path.is_symlink() or not path.is_file())
     extra, missing = sorted(set(entries) - PUBLISH_FILES), sorted(PUBLISH_FILES - set(entries))
@@ -49,6 +45,12 @@ def inspect(folder, passphrase, today, start=None, site=SITE_DIR):
         parts = [f"{label}：{'、'.join(names)}" for label, names in
                  (("ファイル以外", odd), ("想定外", extra), ("不足", missing)) if names]
         raise RuntimeError(f"公開してよいファイルの一覧と一致しません（{' ／ '.join(parts)}）")
+    return entries
+
+
+def inspect(folder, passphrase, today, start=None, site=SITE_DIR):
+    """許可されたファイルの内容と暗号化形式、復号後の全レコードを検査する。"""
+    entries = publish_entries(folder)
     for name in STATIC_FILES:
         if entries[name].read_bytes() != (site / name).read_bytes():
             raise RuntimeError(f"{name} が site/ と一致しません。ビルドし直してください")
@@ -74,20 +76,30 @@ def inspect(folder, passphrase, today, start=None, site=SITE_DIR):
     return len(dataset["days"])
 
 
+def copy_dist(target, work):
+    """ビルド完了済みの出力だけを公開用の作業フォルダに写す。"""
+    with output_lock(target):
+        pending = target.with_name(target.name + ".tmp") / ".pending"
+        if pending.exists():
+            raise RuntimeError("前回のビルドが途中で中断しました。先にビルドし直してください")
+        if not (target / DATA_FILE).exists():
+            raise RuntimeError(f"dist/{DATA_FILE} がありません。先に python -m pipeline.build を実行してください")
+        publish_entries(target)
+        shutil.copytree(target, work, symlinks=True)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="dist/ を gh-pages へ公開する")
     parser.add_argument("--dry-run", action="store_true", help="送信せず内容だけ確認する")
     args = parser.parse_args(argv)
     try:
-        if not (DIST_DIR / DATA_FILE).exists():
-            raise RuntimeError(f"dist/{DATA_FILE} がありません。先に python -m pipeline.build を実行してください")
         env = load_env()
         remote = git("remote", "get-url", "origin", cwd=ROOT)
         name = git("config", "user.name", cwd=ROOT)
         email = git("config", "user.email", cwd=ROOT)
         with tempfile.TemporaryDirectory(prefix="hibi-deploy-") as folder:
             work = Path(folder) / "site"
-            shutil.copytree(DIST_DIR, work)
+            copy_dist(DIST_DIR, work)
             count = inspect(work, env.get("SITE_PASSPHRASE", ""), datetime.now(JST).date(), start_date(env))
             git("init", "--quiet", "--initial-branch", BRANCH, cwd=work)
             git("add", "--all", cwd=work)

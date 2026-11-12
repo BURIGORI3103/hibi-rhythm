@@ -27,6 +27,33 @@ def pc(**overrides):
 
 
 class PublishStagingTests(unittest.TestCase):
+    def test_replace_failure_restores_previous_generation(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from pipeline.build import publish_staging
+
+        with tempfile.TemporaryDirectory() as folder:
+            staging, target = Path(folder) / "dist.tmp", Path(folder) / "dist"
+            staging.mkdir()
+            target.mkdir()
+            for name in ("app.js", "index.html"):
+                (staging / name).write_text("new", encoding="utf-8")
+                (target / name).write_text("old", encoding="utf-8")
+            replace = os.replace
+
+            def fail_second_file(source, destination):
+                if source == staging / "index.html" and destination == target / "index.html":
+                    raise PermissionError("合成した置き換え失敗")
+                replace(source, destination)
+
+            with patch("pipeline.build.os.replace", side_effect=fail_second_file):
+                with self.assertRaises(PermissionError):
+                    publish_staging(staging, target)
+            self.assertEqual((target / "app.js").read_text(encoding="utf-8"), "old")
+            self.assertEqual((target / "index.html").read_text(encoding="utf-8"), "old")
+
     def test_files_are_replaced_without_removing_the_target_folder(self):
         import tempfile
         from pathlib import Path
@@ -59,6 +86,115 @@ class PublishStagingTests(unittest.TestCase):
             os.chmod(target, stat.S_IREAD)
             remove_tree(target)
             self.assertFalse(target.exists())
+
+    def test_restart_recovers_after_process_exit_and_blocks_deploy_snapshot(self):
+        import subprocess
+        import sys
+        import tempfile
+        from pathlib import Path
+        from pipeline.build import restore_previous
+        from pipeline.config import PUBLISH_FILES
+        from pipeline.deploy import copy_dist
+
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            staging, target = root / "dist.tmp", root / "dist"
+            staging.mkdir()
+            target.mkdir()
+            for name in PUBLISH_FILES:
+                (staging / name).write_text("new", encoding="utf-8")
+                (target / name).write_text("old", encoding="utf-8")
+            script = """\
+import os, sys
+from pathlib import Path
+from unittest.mock import patch
+from pipeline.build import output_lock, publish_staging
+staging, target = map(Path, sys.argv[1:])
+replace = os.replace
+def exit_after_replace(source, destination):
+    replace(source, destination)
+    if destination == target / "app.js":
+        os._exit(97)
+with output_lock(target), patch("pipeline.build.os.replace", side_effect=exit_after_replace):
+    publish_staging(staging, target)
+"""
+            result = subprocess.run([sys.executable, "-c", script, str(staging), str(target)], timeout=30)
+            self.assertEqual(result.returncode, 97)
+            self.assertEqual((target / "app.js").read_text(encoding="utf-8"), "new")
+            with self.assertRaisesRegex(RuntimeError, "中断"):
+                copy_dist(target, root / "snapshot")
+            restore_previous(staging, target)
+            restore_previous(staging, target)
+            self.assertEqual((target / "app.js").read_text(encoding="utf-8"), "old")
+            self.assertEqual((target / "data.enc.json").read_text(encoding="utf-8"), "old")
+            copy_dist(target, root / "snapshot")
+            self.assertEqual((root / "snapshot" / "app.js").read_text(encoding="utf-8"), "old")
+
+
+class ActivityWatchCollectionTests(unittest.TestCase):
+    def test_wrong_schema_duplicate_or_incomplete_output_stops_collection(self):
+        from pathlib import Path
+        from subprocess import CompletedProcess
+        from tempfile import TemporaryDirectory
+        from unittest.mock import patch
+        from pipeline.collect_pc import collect
+
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            python = root / ".venv" / "Scripts" / "python.exe"
+            python.parent.mkdir(parents=True)
+            python.touch()
+            (root / "activitywatch_to_json.py").touch()
+            payload = {"schema": 1, "timezone": "Asia/Tokyo", "days": [pc()]}
+            for change in ({"schema": 2}, {"timezone": "UTC"}, {"days": [pc(), pc()]}, {"days": []}):
+                result = CompletedProcess([], 0, json.dumps(payload | change), "")
+                with self.subTest(change=list(change)), patch("pipeline.collect_pc.subprocess.run", return_value=result):
+                    with self.assertRaises(CollectError):
+                        collect([DAY], root)
+
+    def test_window_without_any_afk_data_is_incomplete(self):
+        from pipeline.build import describe
+        from pipeline.merge import refresh
+
+        source = pc(active_seconds=0, not_afk_seconds=0, afk_seconds=0,
+                    unknown_seconds=86400, window_seconds=1800, window_unknown_seconds=1800,
+                    apps=[], hours=[0] * 24, spans=[], longest_not_afk_seconds=0)
+        record = build_record(DAY, source, None, [])
+        self.assertEqual(refresh(record)["pc"]["state"], "partial")
+        self.assertEqual(record["pc"]["window_unknown"], 1800)
+        self.assertNotIn("PC 0分", describe(record))
+
+
+class LocalRecordRecoveryTests(unittest.TestCase):
+    def test_invalid_saved_record_is_preserved_even_when_recollected(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from unittest.mock import patch
+        from pipeline import build
+
+        with TemporaryDirectory() as folder:
+            root = Path(folder)
+            broken = root / f"{DAY}.json"
+            broken.write_text("壊れた合成JSON", encoding="utf-8")
+            with (patch.object(build, "DAYS_DIR", root),
+                  patch.object(build.collect_pc, "collect", return_value={}),
+                  patch.object(build.collect_sleep, "collect", return_value=({}, []))):
+                with self.assertRaisesRegex(ValueError, "保存済みレコード"):
+                    build.collect_records([DAY], {})
+            self.assertEqual(broken.read_text(encoding="utf-8"), "壊れた合成JSON")
+
+
+class NotionPaginationTests(unittest.TestCase):
+    def test_repeated_cursor_stops_without_returning_partial_results(self):
+        from io import StringIO
+        from unittest.mock import patch
+        from pipeline.collect_sleep import query_all
+
+        page = {"results": [{"object": "page"}], "has_more": True, "next_cursor": "synthetic-cursor"}
+        with patch("pipeline.collect_sleep.urlopen", side_effect=[
+                StringIO(json.dumps(page)), StringIO(json.dumps(page)), AssertionError("不要な再取得")]):
+            with self.assertRaisesRegex(CollectError, "ページ"):
+                query_all("synthetic-source", "synthetic-placeholder")
 
 
 class StartDateTests(unittest.TestCase):
