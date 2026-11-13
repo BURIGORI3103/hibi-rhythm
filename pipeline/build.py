@@ -71,6 +71,8 @@ def collect_records(days, env, today=None):
     """実データを収集して data/days/ に保存し、保存済みの全日を返す。"""
     today = today or datetime.now(JST).date()
     start = start_date(env)
+    staging = DAYS_DIR.with_name(DAYS_DIR.name + ".tmp")
+    restore_previous(staging, DAYS_DIR)
     saved = within(load_saved(DAYS_DIR), start)
     validate_dataset(saved, today, start)
     pc = collect_pc.collect(days, env.get("ACTIVITYWATCH_PROJECT") or DEFAULT_ACTIVITYWATCH_PROJECT)
@@ -80,9 +82,14 @@ def collect_records(days, env, today=None):
                for day in tqdm(days, desc="日別レコードを統合", unit="日", file=sys.stderr)]
     validate_dataset(rebuilt, today, start)
     records = {record["date"]: record for record in saved}
-    for record in rebuilt:
-        atomic_write(DAYS_DIR / f"{record['date']}.json", json.dumps(record, ensure_ascii=False, indent=1) + "\n")
-        records[record["date"]] = record
+    if rebuilt:
+        remove_tree(staging)
+        staging.mkdir(parents=True)
+        for record in rebuilt:
+            name = f"{record['date']}.json"
+            atomic_write(staging / name, json.dumps(record, ensure_ascii=False, indent=1) + "\n")
+            records[record["date"]] = record
+        publish_staging(staging, DAYS_DIR, remove_extra=False)
     return list(records.values()), rebuilt
 
 
@@ -176,11 +183,13 @@ def restore_previous(staging, target):
     pending.unlink()
 
 
-def publish_staging(staging, target):
+def publish_staging(staging, target, *, remove_extra=True):
     """target フォルダを残し、置き換え途中で失敗した場合は旧版を復元する。"""
     target.mkdir(parents=True, exist_ok=True)
     names = sorted(path.name for path in staging.iterdir())
     existing = {path.name: path for path in target.iterdir()}
+    if not remove_extra:
+        existing = {name: existing[name] for name in names if name in existing}
     previous, removed = staging / ".previous", staging / ".removed"
     previous.mkdir()
     removed.mkdir()

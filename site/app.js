@@ -473,8 +473,7 @@ ${clock(a)}〜${clock(b)}${amount}`));
     $('table').replaceChildren(table);
   }
 
-  function renderAll() {
-    renderDay();
+  function renderPeriod() {
     renderRhythm();
     renderTrend();
     document.querySelectorAll('.seg button').forEach((button) => {
@@ -483,9 +482,17 @@ ${clock(a)}〜${clock(b)}${amount}`));
   }
   function select(date) {
     const index = state.days.findIndex((rec) => rec.date === date);
-    if (index < 0) return;
+    if (index < 0 || index === state.index) return;
     state.index = index;
-    renderAll();
+    renderDay();
+    document.querySelectorAll('#rhythm [data-date], #trend [data-date]').forEach((node) => {
+      const selected = node.dataset.date === date;
+      node.classList.toggle('is-selected', selected);
+      if (node.classList.contains('row')) {
+        if (selected) node.setAttribute('aria-current', 'date');
+        else node.removeAttribute('aria-current');
+      }
+    });
   }
 
   /* ---------- 復号 ---------- */
@@ -553,7 +560,8 @@ ${clock(a)}〜${clock(b)}${amount}`));
     $('sample-banner').hidden = !dataset.sample;
     $('gate').hidden = true;
     $('app').hidden = false;
-    renderAll();
+    renderDay();
+    renderPeriod();
     renderTable();
   }
 
@@ -619,8 +627,10 @@ ${clock(a)}〜${clock(b)}${amount}`));
   });
   document.querySelectorAll('.seg button').forEach((button) => {
     button.addEventListener('click', () => {
-      state.range = Number(button.dataset.range);
-      renderAll();
+      const range = Number(button.dataset.range);
+      if (range === state.range) return;
+      state.range = range;
+      renderPeriod();
     });
   });
   for (const id of ['rhythm', 'trend']) {

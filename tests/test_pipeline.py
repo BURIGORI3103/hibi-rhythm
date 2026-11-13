@@ -184,6 +184,91 @@ class ActivityWatchCollectionTests(unittest.TestCase):
 
 
 class LocalRecordRecoveryTests(unittest.TestCase):
+    def test_next_collection_restores_days_after_process_exit(self):
+        import subprocess
+        import sys
+        from datetime import timedelta
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from unittest.mock import patch
+        from pipeline import build
+
+        with TemporaryDirectory() as folder:
+            root = Path(folder) / "days"
+            root.mkdir()
+            target = root / f"{DAY}.json"
+            previous = json.dumps(build_record(DAY, None, None, [])) + "\n"
+            target.write_text(previous, encoding="utf-8")
+            script = """\
+from datetime import date
+import os
+from pathlib import Path
+import sys
+from unittest.mock import patch
+from pipeline import build
+
+root, day = Path(sys.argv[1]), date.fromisoformat(sys.argv[2])
+replace = os.replace
+def terminate_after_update(source, destination):
+    replace(source, destination)
+    if destination.parent == root:
+        os._exit(96)
+
+with (patch.object(build, "DAYS_DIR", root),
+      patch.object(build.collect_pc, "collect", return_value={}),
+      patch.object(build.collect_sleep, "collect", return_value=({}, [])),
+      patch("pipeline.build.os.replace", side_effect=terminate_after_update)):
+    build.collect_records([day], {})
+"""
+            result = subprocess.run([sys.executable, "-X", "utf8", "-c", script, str(root), DAY.isoformat()],
+                                    timeout=30, capture_output=True)
+            self.assertEqual(result.returncode, 96)
+            self.assertNotEqual(target.read_text(encoding="utf-8"), previous)
+            with (patch.object(build, "DAYS_DIR", root),
+                  patch.object(build.collect_pc, "collect", return_value={}),
+                  patch.object(build.collect_sleep, "collect", return_value=({}, []))):
+                saved, rebuilt = build.collect_records([], {}, DAY + timedelta(days=1))
+            self.assertEqual(saved, [json.loads(previous)])
+            self.assertEqual(rebuilt, [])
+            self.assertEqual(target.read_text(encoding="utf-8"), previous)
+
+    def test_second_day_write_failure_keeps_both_previous_days(self):
+        from datetime import timedelta
+        import os
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from unittest.mock import patch
+        from pipeline import build
+
+        days = [DAY - timedelta(days=1), DAY]
+        with TemporaryDirectory() as folder:
+            root = Path(folder) / "days"
+            root.mkdir()
+            old_contents = {}
+            for day in days:
+                path = root / f"{day}.json"
+                old_contents[path] = json.dumps(build_record(day, None, None, [])) + "\n"
+                path.write_text(old_contents[path], encoding="utf-8")
+            marker = root / "manual.txt"
+            marker.write_text("別用途の合成ファイル", encoding="utf-8")
+            replace = os.replace
+
+            def fail_second(source, destination):
+                if destination == root / f"{DAY}.json":
+                    raise PermissionError("2日目に合成書き込み失敗")
+                replace(source, destination)
+
+            with (patch.object(build, "DAYS_DIR", root),
+                  patch.object(build.collect_pc, "collect", return_value={}),
+                  patch.object(build.collect_sleep, "collect", return_value=({
+                      day.isoformat(): {"state": "確定", "lower": 50, "upper": 50} for day in days}, [])),
+                  patch("pipeline.build.os.replace", side_effect=fail_second)):
+                with self.assertRaises(PermissionError):
+                    build.collect_records(days, {}, DAY + timedelta(days=1))
+            for path, content in old_contents.items():
+                self.assertEqual(path.read_text(encoding="utf-8"), content)
+            self.assertEqual(marker.read_text(encoding="utf-8"), "別用途の合成ファイル")
+
     def test_invalid_saved_record_is_preserved_even_when_recollected(self):
         from pathlib import Path
         from tempfile import TemporaryDirectory
