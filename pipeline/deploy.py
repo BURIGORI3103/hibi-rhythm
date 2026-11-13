@@ -1,6 +1,7 @@
 """dist/ を gh-pages ブランチへ公開する。
 
-毎回、履歴を持たない単一コミットを force push する。古い暗号文をブランチの履歴に溜めないため。
+古い暗号文をブランチの履歴に溜めないよう、履歴を持たない単一コミットに置き換える。
+公開準備を始めた時点のリモート先端を指定し、並行更新があった場合は置き換えを中断する。
 
 dist/ をまず作業用フォルダへ写し、その写しを検査して、同じ写しを送信する。検査のあとで
 dist/ が書き換わっても、検査していない内容が送信されることはない。
@@ -13,6 +14,7 @@ import argparse
 from datetime import datetime
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -30,8 +32,8 @@ BRANCH = "gh-pages"
 def git(*args, cwd, raw=False):
     result = subprocess.run(["git", *args], cwd=cwd, capture_output=True)
     if result.returncode != 0:
-        if args[0] == "push":
-            raise RuntimeError("git push に失敗しました。認証、ネットワーク、リモートの設定を確認してください")
+        if args[0] in ("ls-remote", "push"):
+            raise RuntimeError(f"git {args[0]} に失敗しました。並行更新、認証、ネットワーク、リモートの設定を確認してください")
         reason = result.stderr.decode("utf-8", errors="replace").strip().splitlines()
         raise RuntimeError(f"git {args[0]} に失敗：{reason[-1] if reason else '原因不明'}")
     return result.stdout if raw else result.stdout.decode("utf-8").strip()
@@ -90,15 +92,31 @@ def copy_dist(target, work):
     shutil.copytree(target, work, symlinks=True)
 
 
+def remote_head(remote, ref):
+    """初回公開は空の期待値を使う。読み取り失敗や不明な応答では停止する。"""
+    result = git("ls-remote", "--refs", "--", remote, ref, cwd=ROOT)
+    if not result:
+        return ""
+    oid, separator, name = result.partition("\t")
+    if not separator or name != ref or re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", oid) is None:
+        raise RuntimeError("公開先ブランチのコミットを一意に確認できません")
+    return oid
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="dist/ を gh-pages へ公開する")
     parser.add_argument("--dry-run", action="store_true", help="送信せず内容だけ確認する")
     args = parser.parse_args(argv)
+    attempted_push = False
     try:
         env = load_env()
         name = git("config", "user.name", cwd=ROOT)
         email = git("config", "user.email", cwd=ROOT)
         with output_lock(DIST_DIR), tempfile.TemporaryDirectory(prefix="hibi-deploy-") as folder:
+            if not args.dry_run:
+                remote = git("remote", "get-url", "--push", "origin", cwd=ROOT)
+                ref = f"refs/heads/{BRANCH}"
+                expected_head = remote_head(remote, ref)
             work = Path(folder) / "site"
             copy_dist(DIST_DIR, work)
             count = inspect(work, env.get("SITE_PASSPHRASE", ""), datetime.now(JST).date(), start_date(env))
@@ -122,10 +140,11 @@ def main(argv=None):
                 for file in files:
                     print(f"  {file}")
                 return 0
-            remote = git("remote", "get-url", "origin", cwd=ROOT)
-            git("push", "--force", remote, f"{BRANCH}:{BRANCH}", cwd=work)
+            attempted_push = True
+            git("push", f"--force-with-lease={ref}:{expected_head}", "--", remote, f"{ref}:{ref}", cwd=work)
     except (RuntimeError, OSError) as error:
-        print(f"中断：{error}（公開中のサイトは変更していません）", file=sys.stderr)
+        suffix = "公開先の状態を確認してください" if attempted_push else "送信していません"
+        print(f"中断：{error}（{suffix}）", file=sys.stderr)
         return 1
     print(f"公開完了：{count}日分、{len(files)}ファイルを {BRANCH} へ送信しました")
     return 0

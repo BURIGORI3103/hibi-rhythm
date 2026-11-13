@@ -40,19 +40,28 @@ class DeployCommitTests(unittest.TestCase):
         self.committed = {}
         self.push_result = None
         self.simulate_mismatch = False
+        self.remote = "https://synthetic:placeholder@example.invalid/project"
+        self.use_bare_remote = False
+        self.before_push = None
         stack.enter_context(patch.object(deploy, "git", side_effect=self.git))
         stack.enter_context(patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "core.autocrlf",
                                                       "GIT_CONFIG_VALUE_0": "true"}))
 
     def git(self, *args, cwd, **kwargs):
         if args[0] == "remote":
-            return "https://synthetic:placeholder@example.invalid/project"
+            return str(self.remote)
         if args[0] == "config" and args[-1] in ("user.name", "user.email"):
             return "synthetic@example.invalid" if args[-1] == "user.email" else "Synthetic"
         if args[0] == "cat-file" and self.simulate_mismatch:
             return b"synthetic mismatch"
+        if args[0] == "ls-remote" and not self.use_bare_remote:
+            return ""
         if args[0] == "push":
             self.pushed = True
+            if self.use_bare_remote:
+                if self.before_push:
+                    self.before_push(cwd)
+                return self.real_git(*args, cwd=cwd, **kwargs)
             script = ("import sys; from pathlib import Path; from pipeline.build import output_lock\n"
                       "try:\n    with output_lock(Path(sys.argv[1])): pass\n"
                       "except OSError:\n    sys.exit(23)\n")
@@ -85,3 +94,24 @@ class DeployCommitTests(unittest.TestCase):
             self.assertEqual(deploy.main([]), 1)
         self.assertIn("検査時の内容と一致しません", error.getvalue())
         self.assertFalse(self.pushed)
+
+    def test_publish_rejects_concurrent_change_of_remote_ref(self):
+        self.remote = self.dist.parent / "synthetic-remote.git"
+        self.real_git("init", "--bare", "--quiet", str(self.remote), cwd=self.dist.parent)
+        self.use_bare_remote = True
+        branch = "synthetic-pages"
+        ref = f"refs/heads/{branch}"
+        with patch.object(deploy, "BRANCH", branch), redirect_stdout(StringIO()), redirect_stderr(StringIO()):
+            self.assertEqual(deploy.main([]), 0)
+            initial = self.real_git("rev-parse", ref, cwd=self.remote)
+
+            def publish_concurrent(work):
+                self.real_git("fetch", str(self.remote), ref, cwd=work)
+                tree = self.real_git("rev-parse", "HEAD^{tree}", cwd=work)
+                new = self.real_git("-c", "user.name=Synthetic", "-c", "user.email=synthetic@example.invalid",
+                                    "commit-tree", tree, "-p", initial, "-m", "並行処理の合成コミット", cwd=work)
+                self.real_git("push", str(self.remote), f"{new}:{ref}", cwd=work)
+
+            self.before_push = publish_concurrent
+            self.assertEqual(deploy.main([]), 1)
+            self.assertEqual(self.real_git("rev-parse", f"{ref}^", cwd=self.remote), initial)
