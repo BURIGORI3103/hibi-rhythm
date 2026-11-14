@@ -111,10 +111,12 @@ def pc_state(pc):
     not-afk なのにウィンドウ記録がない時間が長い日は、稼働時間が実際より短く出ている。
     確定値として扱わず「一部欠測」にする（過大の疑いである「参考値」より優先する）。
     """
-    if pc["unknown"] >= 86399 and pc["active"] == 0:
-        return "none"
-    if pc["not_afk"] - pc["active"] > PC_WINDOW_GAP_SECONDS:
+    window_unknown = pc.get("window_unknown", 0)
+    if (pc["not_afk"] - pc["active"] > PC_WINDOW_GAP_SECONDS
+            or window_unknown > PC_WINDOW_GAP_SECONDS):
         return "partial"
+    if pc["unknown"] >= 86399 and pc["active"] == 0:
+        return "partial" if window_unknown > 0 else "none"
     return "caution" if pc["state"] == "caution" else "ok"
 
 
@@ -135,6 +137,11 @@ def build_pc(pc):
         "apps": shown,
         "apps_other": {"count": len(rest), "seconds": sum(app["seconds"] for app in rest)},
     }
+    if "window_unknown_seconds" in pc:
+        value = pc["window_unknown_seconds"]
+        if not is_number(value) or not 0 <= value <= 86400:
+            raise ValueError("ActivityWarch のAFK欠測秒数が不正です")
+        result["window_unknown"] = round(value)
     result["state"] = pc_state(result)
     return result
 
@@ -143,7 +150,8 @@ def refresh(record):
     """保存済みレコードの欠測判定を、いまの基準で付け直す（数値は変えない）。"""
     pc = record.get("pc")
     if isinstance(pc, dict) and pc.get("state") in ("ok", "caution", "partial", "none"):
-        if all(is_number(pc.get(key)) for key in ("active", "not_afk", "unknown")):
+        if (all(is_number(pc.get(key)) for key in ("active", "not_afk", "unknown"))
+                and is_number(pc.get("window_unknown", 0))):
             pc["state"] = pc_state(pc)
     return record
 
@@ -211,10 +219,13 @@ def validate(record):
     if pc["state"] == "missing":
         require(pc == {"state": "missing", "segments": []}, day, "未取得のPCレコードに値が入っています")
         return
-    require(set(pc) == PC_KEYS, day, "PCの項目が想定と違います")
+    require(set(pc) - {"window_unknown"} == PC_KEYS, day, "PCの項目が想定と違います")
     for name in PC_TOTALS:
         require(is_number(pc[name]) and 0 <= pc[name] <= 86400, day, f"PCの{name}が0〜86400秒の範囲外です（{pc[name]!r}）")
     require(pc["active"] <= pc["not_afk"] + 1, day, "PC稼働判定がnot-afk時間を超えています")
+    window_unknown = pc.get("window_unknown", 0)
+    require(is_number(window_unknown) and 0 <= window_unknown <= pc["unknown"] + 1,
+            day, "PCのウィンドウ記録と重なるAFK欠測秒数が不正です")
     require(isinstance(pc["hours"], list) and len(pc["hours"]) == 24
             and all(is_number(value) and 0 <= value <= 3601 for value in pc["hours"]), day, "PCの時間帯別の値が不正です")
     apps, other = pc["apps"], pc["apps_other"]
