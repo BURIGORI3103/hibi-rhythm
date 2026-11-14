@@ -1,0 +1,673 @@
+/* 日々リズム：暗号化データをブラウザ内で復号して表示する。外部へは何も送信しない。
+   暗号形式は pipeline/encrypt.py と対になる。変更するときは両方を同時に直すこと。 */
+(() => {
+  'use strict';
+
+  const STORE_KEY = 'hibi-rhythm-passphrase';
+  const DOW = ['日', '月', '火', '水', '木', '金', '土'];
+  const SLEEP_LABEL = { none: '記録なし', unsynced: '未同期', missing: '未取得', gap: '一部欠測' };
+  const SLEEP_HINT = {
+    none: 'この日の睡眠記録がありません', unsynced: 'まだ同期されていません', missing: 'まだ取り込まれていません',
+    gap: '集計の一部が欠けているため、時間は不明です',
+  };
+  const state = { days: [], byDate: new Map(), index: 0, range: 14 };
+
+  const $ = (id) => document.getElementById(id);
+  function el(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text != null) node.textContent = text;
+    return node;
+  }
+
+  /* ---------- 表記 ---------- */
+  const pad = (n) => String(n).padStart(2, '0');
+  const whole = (min) => Math.floor(min + 1e-9);
+  function hm(min) {
+    const m = whole(min);
+    return m >= 60 ? `${Math.floor(m / 60)}時間${m % 60}分` : `${m}分`;
+  }
+  const hmShort = (min) => (min > 0 && min < 1 ? '1分未満' : hm(min));
+  function short(min) {
+    const m = whole(min);
+    return `${Math.floor(m / 60)}:${pad(m % 60)}`;
+  }
+  function clock(min) {
+    const m = Math.round(min);
+    return `${pad(Math.floor(m / 60))}:${pad(m % 60)}`;
+  }
+  function durNode(min) {
+    const frag = document.createDocumentFragment();
+    const m = whole(min);
+    if (m >= 60) frag.append(String(Math.floor(m / 60)), el('small', null, '時間'));
+    frag.append(String(m % 60), el('small', null, '分'));
+    return frag;
+  }
+  function parseDate(text) {
+    const [y, m, d] = text.split('-').map(Number);
+    return { y, m, d, dow: DOW[new Date(y, m - 1, d).getDay()] };
+  }
+  function longDate(text) {
+    const p = parseDate(text);
+    return `${p.y}年${p.m}月${p.d}日（${p.dow}）`;
+  }
+  function addDays(text, count) {
+    const p = parseDate(text);
+    const t = new Date(p.y, p.m - 1, p.d + count);
+    return `${t.getFullYear()}-${pad(t.getMonth() + 1)}-${pad(t.getDate())}`;
+  }
+
+  /* ---------- 値の取り出し（不明は null のまま扱う） ----------
+     「値が分かっている」の判定はここだけに置き、表示・棒グラフ・平均のすべてがこれを使う。
+     pipeline/merge.py の sleep_range / pc_state と対になる。 */
+  const isNum = (value) => typeof value === 'number' && Number.isFinite(value);
+  // 睡眠：状態が「確定」「一部不明」で、下限と上限の両方がある日だけ。片方だけの値や未同期の行の値は使わない。
+  function sleepRange(sleep) {
+    if (!sleep || (sleep.state !== 'confirmed' && sleep.state !== 'partial')) return null;
+    return isNum(sleep.lower) && isNum(sleep.upper) ? [sleep.lower, sleep.upper] : null;
+  }
+  function sleepUnknown(sleep) {
+    if (!sleep) return 'missing';
+    if (sleep.state === 'confirmed' || sleep.state === 'partial') return 'gap';   // 状態は値ありなのに下限か上限がない
+    return ['none', 'unsynced'].includes(sleep.state) ? sleep.state : 'missing';
+  }
+  function sleepText(sleep, format) {
+    const range = sleepRange(sleep);
+    if (!range) return SLEEP_LABEL[sleepUnknown(sleep)];
+    return range[0] === range[1] ? format(range[1]) : `${format(range[0])}〜${format(range[1])}`;
+  }
+  // PC：ok / caution は値あり。partial は記録の一部が欠けた下限値で、平均と棒グラフには入れない。
+  const pcKind = (pc) => (pc && isNum(pc.active) && ['ok', 'caution', 'partial', 'none'].includes(pc.state) ? pc.state : 'missing');
+  function pcMinutes(pc) {
+    const kind = pcKind(pc);
+    return kind === 'ok' || kind === 'caution' ? pc.active / 60 : null;
+  }
+  function pcText(pc, format) {
+    const kind = pcKind(pc);
+    if (kind === 'missing') return '未取得';
+    if (kind === 'none') return '記録なし';
+    if (kind === 'partial' && pc.active === 0) return '一部欠測';
+    return kind === 'partial' ? `${format(pc.active / 60)}以上` : format(pc.active / 60);
+  }
+  const pcMark = (pc) => ({ caution: '参考値', partial: '一部欠測' }[pcKind(pc)] || '');
+  const appName = (name) => name.replace(/\.exe$/i, '');
+
+  /* ---------- タイムライン ---------- */
+  function block(a, b, cls, tip) {
+    const node = el('span', `blk ${cls}`);
+    node.style.left = `${(a / 1440) * 100}%`;
+    node.style.width = `${((b - a) / 1440) * 100}%`;
+    node.dataset.tip = tip;
+    return node;
+  }
+  function lanes(rec) {
+    const wrap = el('span', 'lanes');
+    const sleep = el('span', 'lane');
+    const pc = el('span', 'lane');
+    if (rec) {
+      for (const [a, b, kind] of rec.sleep.segments) {
+        const name = kind === 'u' ? '睡眠（実睡眠は不明）' : '睡眠';
+        sleep.append(block(a, b, kind === 'u' ? 'is-soft' : 'is-sleep', `${name}\n${clock(a)}〜${clock(b)}（${hm(b - a)}）`));
+      }
+      // 区間は1分以下の隙間を結合して描いている。時間は区間の長さではなく、実際の稼働分（3番目の値）を出す。
+      for (const [a, b, active] of rec.pc.segments) {
+        const amount = isNum(active) ? `（うち稼働 ${hmShort(active)}）` : '';
+        pc.append(block(a, b, 'is-pc', `PC稼働\n${clock(a)}〜${clock(b)}${amount}`));
+      }
+    }
+    wrap.append(sleep, pc);
+    return wrap;
+  }
+  function hoursAxis() {
+    const axis = el('span', 'hours');
+    [0, 6, 12, 18, 24].forEach((hour) => {
+      const label = el('span', hour === 0 ? 'is-first' : hour === 24 ? 'is-last' : null, String(hour));
+      label.style.left = `${(hour / 24) * 100}%`;
+      axis.append(label);
+    });
+    return axis;
+  }
+  /* 24時間の文字盤：0時を上にした時計回り。外周が睡眠、内周がPC。 */
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  function svg(tag, attrs, cls) {
+    const node = document.createElementNS(SVG_NS, tag);
+    for (const [key, value] of Object.entries(attrs || {})) node.setAttribute(key, value);
+    if (cls) node.setAttribute('class', cls);
+    return node;
+  }
+  function polar(r, min) {
+    const angle = (min / 1440) * Math.PI * 2 - Math.PI / 2;
+    return [120 + r * Math.cos(angle), 120 + r * Math.sin(angle)];
+  }
+  function arc(r, a, b, cls, tip) {
+    let node;
+    if (b - a >= 1439.5) {
+      node = svg('circle', { cx: 120, cy: 120, r }, cls);
+    } else {
+      const [x1, y1] = polar(r, a);
+      const [x2, y2] = polar(r, b);
+      const large = b - a > 720 ? 1 : 0;
+      node = svg('path', { d: `M${x1.toFixed(2)} ${y1.toFixed(2)}A${r} ${r} 0 ${large} 1 ${x2.toFixed(2)} ${y2.toFixed(2)}` }, cls);
+    }
+    node.dataset.tip = tip;
+    return node;
+  }
+  function dial(rec) {
+    const root = svg('svg', { viewBox: '0 0 240 240', role: 'img' }, 'dial');
+    const defs = svg('defs');
+    const hatch = svg('pattern', { id: 'dial-hatch', width: 5, height: 5, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' });
+    hatch.append(svg('rect', { width: 5, height: 5 }, 'hatch-bg'), svg('rect', { width: 1.4, height: 5 }, 'hatch-line'));
+    defs.append(hatch);
+    root.append(defs);
+    root.append(svg('circle', { cx: 120, cy: 120, r: 86 }, 'dial-track track-sleep'), svg('circle', { cx: 120, cy: 120, r: 60 }, 'dial-track track-pc'));
+    root.append(svg('circle', { cx: 120, cy: 120, r: 104 }, 'dial-ticks'));
+    for (const hour of [0, 6, 12, 18]) {
+      const [x1, y1] = polar(98, hour * 60);
+      const [x2, y2] = polar(110, hour * 60);
+      root.append(svg('line', { x1, y1, x2, y2 }, 'dial-major'));
+      const [tx, ty] = polar(124 - 6, hour * 60);
+      const label = svg('text', { x: tx.toFixed(1), y: ty.toFixed(1) }, `dial-hour h${hour}`);
+      label.textContent = String(hour);
+      root.append(label);
+    }
+    const spoken = [];
+    for (const [a, b, kind] of rec.sleep.segments) {
+      const name = kind === 'u' ? '睡眠（実睡眠は不明）' : '睡眠';
+      root.append(arc(86, a, b, kind === 'u' ? 'arc arc-soft' : 'arc arc-sleep', `${name}
+${clock(a)}〜${clock(b)}（${hm(b - a)}）`));
+      spoken.push(`${name} ${clock(a)}から${clock(b)}`);
+    }
+    for (const [a, b, active] of rec.pc.segments) {
+      const amount = isNum(active) ? `（うち稼働 ${hmShort(active)}）` : '';
+      root.append(arc(60, a, b, 'arc arc-pc', `PC稼働
+${clock(a)}〜${clock(b)}${amount}`));
+    }
+    if (rec.pc.segments.length) spoken.push(`PC稼働 ${rec.pc.segments.length}区間`);
+    root.setAttribute('aria-label', `0時から24時の文字盤。${spoken.join('、') || '記録された区間はありません'}`);
+    return root;
+  }
+  function badge(text, warn) {
+    return el('span', warn ? 'badge is-warn' : 'badge', text);
+  }
+
+  /* ---------- その日のサマリーと詳細 ---------- */
+  function renderDay() {
+    const rec = state.days[state.index];
+    $('day-title').textContent = longDate(rec.date);
+    $('prev').disabled = state.index === 0;
+    $('next').disabled = state.index === state.days.length - 1;
+
+    const sleepValue = $('sleep-value');
+    const sleepNote = $('sleep-note');
+    const range = sleepRange(rec.sleep);
+    sleepValue.replaceChildren();
+    sleepValue.classList.toggle('is-unknown', !range);
+    if (!range) {
+      sleepValue.textContent = SLEEP_LABEL[sleepUnknown(rec.sleep)];
+      sleepNote.replaceChildren(el('span', null, SLEEP_HINT[sleepUnknown(rec.sleep)]));
+    } else {
+      if (range[0] === range[1]) sleepValue.append(durNode(range[1]));
+      else sleepValue.append(durNode(range[0]), '〜', document.createElement('wbr'), durNode(range[1]));
+      sleepNote.replaceChildren(el('span', null, '0〜24時に眠っていた時間'));
+      if (rec.sleep.state === 'partial') sleepNote.append(badge('一部不明'));
+    }
+
+    const pcValue = $('pc-value');
+    const pcNote = $('pc-note');
+    const minutes = pcMinutes(rec.pc);
+    const kind = pcKind(rec.pc);
+    pcValue.replaceChildren();
+    pcValue.classList.toggle('is-unknown', minutes == null && (kind !== 'partial' || rec.pc.active === 0));
+    if (kind === 'partial') {
+      if (rec.pc.active > 0) {
+        pcValue.append(durNode(rec.pc.active / 60), el('small', null, '以上'));
+        pcNote.replaceChildren(el('span', null, '操作中とアプリの両方が記録された時間'), badge('一部欠測', true));
+      } else {
+        pcValue.textContent = pcText(rec.pc);
+        pcNote.replaceChildren(el('span', null, '操作中とアプリの両方を確認できた時間がありません'));
+      }
+    } else if (minutes == null) {
+      pcValue.textContent = pcText(rec.pc);
+      pcNote.replaceChildren(el('span', null, kind === 'none' ? 'PCの記録がない日です' : 'まだ取り込まれていません'));
+    } else {
+      pcValue.append(durNode(minutes));
+      pcNote.replaceChildren(el('span', null, '操作中と判定された時間'));
+      if (rec.pc.state === 'caution') pcNote.append(badge('参考値', true));
+    }
+
+    $('day-dial').replaceChildren(dial(rec));
+    renderDetail(rec);
+  }
+
+  function fact(list, term, value) {
+    list.append(el('dt', null, term), el('dd', null, value));
+  }
+
+  function renderDetail(rec) {
+    const box = $('detail');
+    box.replaceChildren();
+
+    const sleepBox = el('div');
+    sleepBox.append(el('h3', null, '睡眠の内訳（この日に目覚めた分）'));
+    const sleep = rec.sleep;
+    const facts = el('dl', 'facts');
+    if (sleep.bed && sleep.wake) fact(facts, '就寝 → 起床', `${sleep.bed} → ${sleep.wake}`);
+    if (sleep.night != null) fact(facts, '眠っていた時間', hm(sleep.night));
+    if (rec.steps != null) fact(facts, '歩数', `${rec.steps.toLocaleString('ja-JP')}歩`);
+    if (facts.children.length) sleepBox.append(facts);
+    else sleepBox.append(el('p', 'empty', '内訳の記録がありません'));
+    const stages = [['深い睡眠', 'stage-deep', sleep.deep], ['レム睡眠', 'stage-rem', sleep.rem], ['浅い睡眠', 'stage-light', sleep.light]]
+      .filter((stage) => stage[2] != null && stage[2] > 0);
+    if (stages.length) {
+      const bar = el('div', 'stages');
+      const legend = el('ul', 'legend');
+      for (const [name, cls, value] of stages) {
+        const part = el('span', cls);
+        part.style.flex = `${value} 1 0`;
+        part.dataset.tip = `${name}\n${hm(value)}`;
+        bar.append(part);
+        const item = el('li');
+        item.append(el('span', `key ${cls}`), `${name} ${hm(value)}`);
+        legend.append(item);
+      }
+      bar.setAttribute('role', 'img');
+      bar.setAttribute('aria-label', stages.map((stage) => `${stage[0]} ${hm(stage[2])}`).join('、'));
+      sleepBox.append(bar, legend);
+    }
+
+    const pcBox = el('div');
+    pcBox.append(el('h3', null, 'PCで使ったアプリ'));
+    const pc = rec.pc;
+    if (pc.apps && pc.apps.length && pc.active > 0) {
+      // 上位のアプリは1分未満でも1件ずつ表示する。「ほか」は上位に入らなかった分だけ。
+      const list = el('div', 'apps');
+      for (const app of pc.apps) {
+        const row = el('div', 'app');
+        const bar = el('div', 'app-bar');
+        const fill = el('span');
+        fill.style.width = `${Math.max((app.seconds / pc.active) * 100, 0.5)}%`;
+        bar.append(fill);
+        const time = app.seconds < 60 ? '1分未満' : hm(app.seconds / 60);
+        row.append(el('span', 'app-name', appName(app.name)), el('span', 'app-time', time), bar);
+        list.append(row);
+      }
+      pcBox.append(list);
+      const rest = pc.apps_other || { count: 0, seconds: 0 };
+      if (rest.count) pcBox.append(el('p', 'empty', `ほか${rest.count}件（合計 ${rest.seconds < 60 ? '1分未満' : hm(rest.seconds / 60)}）`));
+    } else {
+      pcBox.append(el('p', 'empty', 'アプリの記録がありません'));
+    }
+    box.append(sleepBox, pcBox);
+
+    const caveat = el('div', 'caveat');
+    if (pcKind(pc) === 'caution') {
+      caveat.append(el('p', null, `PC：操作中の判定が${hm(pc.longest_not_afk / 60)}途切れずに続いた区間があります。機器の影響で席を離れていた時間も含まれている可能性があるため、参考値としています。`));
+    }
+    if (pcKind(pc) === 'partial') {
+      const gaps = [];
+      if (pc.not_afk - pc.active > 0) gaps.push(`アプリの記録がない操作中判定 約${hm((pc.not_afk - pc.active) / 60)}`);
+      if (pc.window_unknown > 0) gaps.push(`操作中か離席かの判定がないアプリ記録 約${hm(pc.window_unknown / 60)}`);
+      caveat.append(el('p', null, gaps.join('、') + '。この日のPC時間は平均に含めていません。'));
+    }
+    for (const warning of rec.warnings || []) caveat.append(el('p', null, `確認中：${warning}`));
+    if (sleep.note) {
+      const memo = el('details');
+      memo.append(el('summary', null, '睡眠集計のメモ'), el('p', null, sleep.note));
+      caveat.append(memo);
+    }
+    if (caveat.children.length) box.append(caveat);
+  }
+
+  /* ---------- リズム表 ---------- */
+  function latestDate() {
+    return state.days[state.days.length - 1].date;
+  }
+  function renderRhythm() {
+    const box = $('rhythm');
+    box.replaceChildren();
+    const head = el('div', 'rhythm-head');
+    head.append(el('span'), hoursAxis(), el('span'));
+    box.append(head);
+    const selected = state.days[state.index].date;
+    for (let i = 0; i < state.range; i += 1) {
+      const date = addDays(latestDate(), -i);
+      const rec = state.byDate.get(date);
+      const p = parseDate(date);
+      const row = el('button', 'row');
+      row.type = 'button';
+      const label = el('span', 'row-date', `${p.m}/${p.d}`);
+      label.append(el('small', null, p.dow));
+      const totals = el('span', 'row-totals');
+      const sleepLine = el('span');
+      const pcLine = el('span');
+      sleepLine.append(el('b', null, '睡'), rec ? sleepText(rec.sleep, short) : '—');
+      pcLine.append(el('b', null, 'PC'), rec ? pcText(rec.pc, short) + (pcKind(rec.pc) === 'caution' ? ' ※' : '') : '—');
+      totals.append(sleepLine, pcLine);
+      if (rec) {
+        row.dataset.date = date;
+        row.setAttribute('aria-label', `${longDate(date)} 睡眠 ${sleepText(rec.sleep, hm)}、PC ${pcText(rec.pc, hm)}`);
+        if (date === selected) {
+          row.classList.add('is-selected');
+          row.setAttribute('aria-current', 'date');
+        }
+      } else {
+        row.disabled = true;
+      }
+      row.append(label, lanes(rec), totals);
+      box.append(row);
+    }
+  }
+
+  /* ---------- 推移 ---------- */
+  function average(values) {
+    return values.reduce((sum, value) => sum + value, 0) / values.length;
+  }
+  function chart(title, keyClass, avgText, top, dates, tips, bars) {
+    const wrap = el('div', 'chart');
+    const head = el('div', 'chart-head');
+    head.append(el('span', `key ${keyClass}`), el('span', null, title), el('span', 'avg', avgText));
+    const plot = el('div', 'plot');
+    for (let minutes = 0; minutes <= top; minutes += 360) {
+      const tick = el('div', minutes === 0 ? 'tick is-base' : 'tick');
+      tick.style.bottom = `${(minutes / top) * 100}%`;
+      tick.append(el('span', null, `${minutes / 60}時間`));
+      plot.append(tick);
+    }
+    const cols = el('div', 'cols');
+    const labels = el('div', 'xlabels');
+    const step = dates.length <= 14 ? 2 : 5;
+    const selected = state.days[state.index].date;
+    dates.forEach((date, i) => {
+      const col = el('button', 'col');
+      col.type = 'button';
+      col.dataset.tip = tips[i];
+      col.setAttribute('aria-label', tips[i].replace('\n', ' '));
+      if (state.byDate.has(date)) col.dataset.date = date;
+      else col.disabled = true;
+      if (date === selected) col.classList.add('is-selected');
+      col.append(bars[i] || el('span', 'none-mark'));
+      cols.append(col);
+      const p = parseDate(date);
+      labels.append(el('span', null, (dates.length - 1 - i) % step === 0 ? `${p.m}/${p.d}` : ''));
+    });
+    plot.append(cols);
+    wrap.append(head, plot, labels);
+    return wrap;
+  }
+  function renderTrend() {
+    const box = $('trend');
+    const dates = [];
+    for (let i = state.range - 1; i >= 0; i -= 1) dates.push(addDays(latestDate(), -i));
+    const recs = dates.map((date) => state.byDate.get(date) || null);
+    const sleeps = recs.map((rec) => (rec ? sleepRange(rec.sleep) : null));
+    const pcs = recs.map((rec) => (rec ? pcMinutes(rec.pc) : null));
+    const peak = Math.max(720, ...sleeps.filter(Boolean).map((range) => range[1]), ...pcs.filter((value) => value != null));
+    const top = Math.ceil(peak / 360) * 360;
+    const dayLabel = (date) => {
+      const p = parseDate(date);
+      return `${p.m}/${p.d}（${p.dow}）`;
+    };
+
+    const knownSleep = sleeps.filter(Boolean);
+    let sleepAvg = '記録のある日がありません';
+    if (knownSleep.length) {
+      const low = average(knownSleep.map((range) => range[0]));
+      const high = average(knownSleep.map((range) => range[1]));
+      sleepAvg = `平均 ${whole(low) === whole(high) ? hm(high) : `${hm(low)}〜${hm(high)}`}（記録のある${knownSleep.length}日）`;
+    }
+    const sleepBars = sleeps.map((range) => {
+      if (!range) return null;
+      const bar = el('span', 'bar');
+      bar.style.height = `${(range[1] / top) * 100}%`;
+      if (range[1] > range[0]) {
+        const soft = el('span', 'bar-soft');
+        soft.style.height = `${((range[1] - range[0]) / range[1]) * 100}%`;
+        bar.append(soft);
+      }
+      bar.append(el('span', 'bar-solid'));
+      return bar;
+    });
+    const sleepTips = dates.map((date, i) => `${dayLabel(date)}\n睡眠 ${recs[i] ? sleepText(recs[i].sleep, hm) : '未取得'}`);
+
+    const knownPc = pcs.filter((value) => value != null);
+    const pcAvg = knownPc.length ? `平均 ${hm(average(knownPc))}（記録のある${knownPc.length}日）` : '記録のある日がありません';
+    const pcBars = pcs.map((value) => {
+      if (value == null) return null;
+      const bar = el('span', 'bar bar-pc');
+      bar.style.height = `${(value / top) * 100}%`;
+      return bar;
+    });
+    const pcTips = dates.map((date, i) => {
+      const rec = recs[i];
+      const mark = rec ? pcMark(rec.pc) : '';
+      return `${dayLabel(date)}\nPC ${rec ? pcText(rec.pc, hm) : '未取得'}${mark ? `（${mark}）` : ''}`;
+    });
+
+    box.replaceChildren(
+      chart('睡眠（0〜24時）', 'key-sleep', sleepAvg, top, dates, sleepTips, sleepBars),
+      chart('PC（操作中と判定された時間）', 'key-pc', pcAvg, top, dates, pcTips, pcBars),
+    );
+  }
+
+  /* ---------- 表 ---------- */
+  function renderTable() {
+    const table = el('table');
+    const head = el('tr');
+    ['日付', '睡眠（0〜24時）', '就寝', '起床', 'PC', '歩数', '備考'].forEach((name) => head.append(el('th', null, name)));
+    const thead = el('thead');
+    thead.append(head);
+    const body = el('tbody');
+    for (const rec of [...state.days].reverse()) {
+      const p = parseDate(rec.date);
+      const notes = [];
+      if (sleepRange(rec.sleep) && rec.sleep.state === 'partial') notes.push('睡眠は一部不明');
+      if (!sleepRange(rec.sleep) && sleepUnknown(rec.sleep) === 'gap') notes.push('睡眠は集計の一部が欠測');
+      if (pcMark(rec.pc)) notes.push(`PCは${pcMark(rec.pc)}`);
+      const row = el('tr');
+      [`${p.y}/${pad(p.m)}/${pad(p.d)}（${p.dow}）`, sleepText(rec.sleep, hm), rec.sleep.bed || '—', rec.sleep.wake || '—',
+        pcText(rec.pc, hm), rec.steps == null ? '—' : rec.steps.toLocaleString('ja-JP'), notes.join('、')]
+        .forEach((value) => row.append(el('td', null, value)));
+      body.append(row);
+    }
+    table.append(thead, body);
+    $('table').replaceChildren(table);
+  }
+
+  function renderPeriod() {
+    renderRhythm();
+    renderTrend();
+    document.querySelectorAll('.seg button').forEach((button) => {
+      button.setAttribute('aria-pressed', String(Number(button.dataset.range) === state.range));
+    });
+  }
+  function select(date) {
+    const index = state.days.findIndex((rec) => rec.date === date);
+    if (index < 0 || index === state.index) return;
+    state.index = index;
+    renderDay();
+    document.querySelectorAll('#rhythm [data-date], #trend [data-date]').forEach((node) => {
+      const selected = node.dataset.date === date;
+      node.classList.toggle('is-selected', selected);
+      if (node.classList.contains('row')) {
+        if (selected) node.setAttribute('aria-current', 'date');
+        else node.removeAttribute('aria-current');
+      }
+    });
+  }
+
+  /* ---------- 復号 ---------- */
+  function bytes(base64) {
+    return Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+  }
+  // 合言葉の前後から取り除く文字。trim() は Python の strip() と対象が少し違うため使わず、
+  // pipeline/encrypt.py の EDGE_CHARS と同じ文字を明示する。
+  const EDGE = '\\t\\n\\v\\f\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff';
+  const EDGES = new RegExp(`^[${EDGE}]+|[${EDGE}]+$`, 'g');
+  const normalize = (passphrase) => passphrase.normalize('NFKC').replace(EDGES, '');
+  async function decrypt(envelope, passphrase) {
+    const encoder = new TextEncoder();
+    const material = await crypto.subtle.importKey('raw', encoder.encode(normalize(passphrase)), 'PBKDF2', false, ['deriveKey']);
+    const key = await crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt: bytes(envelope.salt), iterations: envelope.iterations, hash: 'SHA-256' },
+      material, { name: 'AES-GCM', length: 256 }, false, ['decrypt'],
+    );
+    let plain = await crypto.subtle.decrypt(
+      { name: 'AES-GCM', iv: bytes(envelope.iv), additionalData: encoder.encode(envelope.aad) }, key, bytes(envelope.data),
+    );
+    if (envelope.compression === 'gzip') {
+      const stream = new Blob([plain]).stream().pipeThrough(new DecompressionStream('gzip'));
+      plain = await new Response(stream).arrayBuffer();
+    }
+    return JSON.parse(new TextDecoder().decode(plain));
+  }
+  // 合言葉を保存するのは「この端末に記憶する」を選んだときだけ（localStorage）。
+  // 選ばなかった場合はどこにも保存しない。復号した記録はこのページのメモリにあるので表示は続けられ、
+  // 再読み込みやタブを閉じたあとは入力し直しになる。
+  const store = {
+    get() {
+      try { return localStorage.getItem(STORE_KEY); } catch (error) { return null; }
+    },
+    set(value, keep) {
+      try {
+        if (keep) localStorage.setItem(STORE_KEY, value);
+        else localStorage.removeItem(STORE_KEY);
+      } catch (error) { /* 保存できない環境でも表示は続ける */ }
+    },
+    clear() {
+      try { localStorage.removeItem(STORE_KEY); } catch (error) { /* 同上 */ }
+    },
+    dropLegacy() {   // 以前の版がタブ単位で保存していた合言葉を消す
+      try { sessionStorage.removeItem(STORE_KEY); } catch (error) { /* 同上 */ }
+    },
+  };
+
+  function fatal(message) {
+    $('fatal-text').textContent = message;
+    $('fatal').hidden = false;
+    $('gate').hidden = true;
+    $('app').hidden = true;
+  }
+  function open(dataset) {
+    state.days = [...dataset.days].sort((a, b) => a.date.localeCompare(b.date));
+    if (!state.days.length) {
+      fatal('まだ記録がありません。');
+      return;
+    }
+    state.byDate = new Map(state.days.map((rec) => [rec.date, rec]));
+    state.index = state.days.length - 1;
+    const stamp = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(dataset.generated_at || '');
+    $('updated').textContent = stamp ? `最終更新 ${stamp[1]}/${stamp[2]}/${stamp[3]} ${stamp[4]}:${stamp[5]}` : '';
+    $('sample-banner').hidden = !dataset.sample;
+    $('gate').hidden = true;
+    $('app').hidden = false;
+    renderDay();
+    renderPeriod();
+    renderTable();
+  }
+
+  async function boot() {
+    if (!window.crypto || !crypto.subtle || typeof DecompressionStream === 'undefined') {
+      fatal('このブラウザでは表示できません。ブラウザを最新版に更新してから開き直してください。');
+      return;
+    }
+    let envelope;
+    try {
+      const response = await fetch('data.enc.json', { cache: 'no-store' });
+      if (!response.ok) throw new Error(String(response.status));
+      envelope = await response.json();
+    } catch (error) {
+      fatal('データを読み込めませんでした。時間をおいて再読み込みしてください。');
+      return;
+    }
+    store.dropLegacy();
+    const saved = store.get();
+    if (saved) {
+      try {
+        open(await decrypt(envelope, saved));
+        return;
+      } catch (error) {
+        store.clear();
+      }
+    }
+    $('gate').hidden = false;
+    $('pass').focus();
+    $('show-pass').addEventListener('change', (event) => {
+      $('pass').type = event.target.checked ? 'text' : 'password';
+    });
+    $('gate-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const button = $('gate-submit');
+      const message = $('gate-error');
+      const passphrase = $('pass').value;
+      button.disabled = true;
+      button.textContent = '確認中…';
+      message.hidden = true;
+      try {
+        const dataset = await decrypt(envelope, passphrase);
+        store.set(passphrase, $('remember').checked);
+        $('pass').value = '';
+        open(dataset);
+      } catch (error) {
+        message.textContent = '合言葉が違うようです。もう一度確認してください。';
+        message.hidden = false;
+        $('pass').select();
+      } finally {
+        button.disabled = false;
+        button.textContent = '開く';
+      }
+    });
+  }
+
+  /* ---------- 操作 ---------- */
+  $('prev').addEventListener('click', () => select(state.days[Math.max(state.index - 1, 0)].date));
+  $('next').addEventListener('click', () => select(state.days[Math.min(state.index + 1, state.days.length - 1)].date));
+  $('lock').addEventListener('click', () => {
+    store.clear();
+    location.reload();
+  });
+  document.querySelectorAll('.seg button').forEach((button) => {
+    button.addEventListener('click', () => {
+      const range = Number(button.dataset.range);
+      if (range === state.range) return;
+      state.range = range;
+      renderPeriod();
+    });
+  });
+  for (const id of ['rhythm', 'trend']) {
+    $(id).addEventListener('click', (event) => {
+      const target = event.target.closest('[data-date]');
+      if (target) select(target.dataset.date);
+    });
+  }
+  window.addEventListener('beforeprint', () => {
+    $('table-details').open = true;
+  });
+
+  const tip = $('tip');
+  function placeTip(event) {
+    const width = tip.offsetWidth;
+    const height = tip.offsetHeight;
+    let x = event.clientX + 12;
+    let y = event.clientY + 16;
+    if (x + width > window.innerWidth - 8) x = Math.max(window.innerWidth - width - 8, 8);
+    if (y + height > window.innerHeight - 8) y = event.clientY - height - 12;
+    tip.style.left = `${x}px`;
+    tip.style.top = `${y}px`;
+  }
+  document.addEventListener('pointerover', (event) => {
+    const target = event.target.closest ? event.target.closest('[data-tip]') : null;
+    if (!target) {
+      tip.hidden = true;
+      return;
+    }
+    tip.textContent = target.dataset.tip;
+    tip.hidden = false;
+    placeTip(event);
+  });
+  document.addEventListener('pointermove', (event) => {
+    if (!tip.hidden) placeTip(event);
+  });
+  document.addEventListener('scroll', () => { tip.hidden = true; }, { passive: true });
+
+  boot();
+})();
