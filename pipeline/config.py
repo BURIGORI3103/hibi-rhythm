@@ -15,14 +15,14 @@ ENV_FILE = ROOT / ".env"
 
 JST = timezone(timedelta(hours=9))
 TIMEZONE_NAME = "Asia/Tokyo"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2   # 2：判定できない睡眠・PCの項目を持たず、両方ない日はレコード自体がない
 
 DEFAULT_ACTIVITYWATCH_PROJECT = r"C:\Project\ActivityWarch"
 RECOLLECT_DAYS = 14          # 毎回取り直す直近日数（Notion側の後追い修正を反映する）
 MIN_PASSPHRASE_LENGTH = 12   # 暗号文は公開されるため、短い合言葉は総当たりされ得る
 MAX_APPS_PER_DAY = 12        # これを超えるアプリは「その他」へまとめる
 PC_GAP_MERGE_SECONDS = 60    # タイムライン描画用に、これ以下の隙間は結合する（合計値には影響しない）
-PC_WINDOW_GAP_SECONDS = 600  # not-afk のうちウィンドウ記録がない時間がこれを超える日は「一部欠測」とする
+LONG_NOT_AFK_SECONDS = 21600  # not-afk がこれ以上連続した日は「参考値」（ActivityWarch の同名の値と同じ）
 
 # 公開してよいファイルはこれだけ。build はこの一式だけを作り、deploy はこれ以外があれば止まる。
 STATIC_FILES = ("app.js", "index.html", "robots.txt", "style.css")

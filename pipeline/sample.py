@@ -49,7 +49,7 @@ def make_daily(day, sessions, rng):
 def make_pc(day, daily_segments, rng, stuck=False, window_gap=0.0):
     """起きている時間帯に操作ブロックを置く。stuck=True は離席判定が効かなかった日の再現。
 
-    window_gap は、操作中なのにウィンドウ記録が欠けていた秒数（「一部欠測」の日の再現）。
+    window_gap は、操作中なのにウィンドウ記録が欠けていた秒数。記録できた時間だけが値になる。
     """
     asleep = [False] * 1440
     for a, b, _ in daily_segments:
@@ -90,7 +90,7 @@ def make_pc(day, daily_segments, rng, stuck=False, window_gap=0.0):
 
 
 def generate(today, count=30, seed=20261111):
-    """直近 count 日ぶんの合成レコードを返す（毎回同じ結果）。"""
+    """直近 count 日のうち、記録する日の合成レコードを返す（毎回同じ結果）。"""
     rng = random.Random(seed)
     days = previous_days(today, count)
     sessions = make_sessions([days[0] - timedelta(days=1), *days], rng)
@@ -99,8 +99,12 @@ def generate(today, count=30, seed=20261111):
         daily = make_daily(day, sessions, rng)
         segments = sleep_segments(day, sessions)
         if index == count - 4 and daily.get("lower") is not None:
-            daily["lower"] = None   # 下限だけ欠けた日（睡眠の「一部欠測」）の再現
-        pc = None if index == 3 else make_pc(day, segments, rng, stuck=(index == count - 6),
-                                             window_gap=2400.0 if index == count - 9 else 0.0)
-        records.append(build_record(day, pc, daily, sessions))
+            daily["lower"] = None   # 下限だけ欠けた日の再現（睡眠は記録しない）
+        if index == 7:
+            daily = {"state": "未同期"}   # 睡眠もPCも分からない日の再現（この日は記録しない）
+        pc = None if index in (3, 7) else make_pc(day, segments, rng, stuck=(index == count - 6),
+                                                  window_gap=2400.0 if index == count - 9 else 0.0)
+        record = build_record(day, pc, daily, sessions)
+        if record is not None:
+            records.append(record)
     return records

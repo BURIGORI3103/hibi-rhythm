@@ -26,6 +26,13 @@ def pc(**overrides):
     return base
 
 
+def daily(**overrides):
+    base = {"bed": "22:32", "wake": "07:16", "night": 524, "deep": 77, "light": 354, "rem": 93,
+            "in_bed": 0, "lower": 60, "upper": 60, "state": "確定", "note": None, "steps": 7971}
+    base.update(overrides)
+    return base
+
+
 class PublishStagingTests(unittest.TestCase):
     def test_replace_failure_restores_previous_generation(self):
         import os
@@ -170,17 +177,16 @@ class ActivityWatchCollectionTests(unittest.TestCase):
                     with self.assertRaises(CollectError):
                         collect([DAY], root)
 
-    def test_window_without_any_afk_data_is_incomplete(self):
+    def test_window_without_any_afk_data_is_not_recorded(self):
         from pipeline.build import describe
-        from pipeline.merge import refresh
 
         source = pc(active_seconds=0, not_afk_seconds=0, afk_seconds=0,
                     unknown_seconds=86400, window_seconds=1800, window_unknown_seconds=1800,
                     apps=[], hours=[0] * 24, spans=[], longest_not_afk_seconds=0)
-        record = build_record(DAY, source, None, [])
-        self.assertEqual(refresh(record)["pc"]["state"], "partial")
-        self.assertEqual(record["pc"]["window_unknown"], 1800)
-        self.assertNotIn("PC 0分", describe(record))
+        self.assertIsNone(build_record(DAY, source, None, []))
+        record = build_record(DAY, source, daily(), [])
+        self.assertNotIn("pc", record)
+        self.assertIn("PC —", describe(record))
 
 
 class LocalRecordRecoveryTests(unittest.TestCase):
@@ -197,7 +203,7 @@ class LocalRecordRecoveryTests(unittest.TestCase):
             root = Path(folder) / "days"
             root.mkdir()
             target = root / f"{DAY}.json"
-            previous = json.dumps(build_record(DAY, None, None, [])) + "\n"
+            previous = json.dumps(build_record(DAY, pc(), None, []), ensure_ascii=False, indent=1) + "\n"
             target.write_text(previous, encoding="utf-8")
             script = """\
 from datetime import date
@@ -216,7 +222,7 @@ def terminate_after_update(source, destination):
 
 with (patch.object(build, "DAYS_DIR", root),
       patch.object(build.collect_pc, "collect", return_value={}),
-      patch.object(build.collect_sleep, "collect", return_value=({}, [])),
+      patch.object(build.collect_sleep, "collect", return_value=({sys.argv[2]: {"state": "確定", "lower": 50, "upper": 50}}, [])),
       patch("pipeline.build.os.replace", side_effect=terminate_after_update)):
     build.collect_records([day], {})
 """
@@ -247,7 +253,7 @@ with (patch.object(build, "DAYS_DIR", root),
             old_contents = {}
             for day in days:
                 path = root / f"{day}.json"
-                old_contents[path] = json.dumps(build_record(day, None, None, [])) + "\n"
+                old_contents[path] = json.dumps(build_record(day, pc(), None, []), ensure_ascii=False, indent=1) + "\n"
                 path.write_text(old_contents[path], encoding="utf-8")
             marker = root / "manual.txt"
             marker.write_text("別用途の合成ファイル", encoding="utf-8")
@@ -268,6 +274,43 @@ with (patch.object(build, "DAYS_DIR", root),
             for path, content in old_contents.items():
                 self.assertEqual(path.read_text(encoding="utf-8"), content)
             self.assertEqual(marker.read_text(encoding="utf-8"), "別用途の合成ファイル")
+
+    def test_days_that_cannot_be_judged_are_removed_from_saved_records(self):
+        from datetime import timedelta
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from unittest.mock import patch
+        from pipeline import build
+
+        old_day, unknown_day, early_day = DAY - timedelta(days=20), DAY - timedelta(days=1), DAY - timedelta(days=40)
+        legacy_pc = {**build_record(DAY, pc(), None, [])["pc"], "state": "partial", "unknown": 81700}
+        with TemporaryDirectory() as folder:
+            root = Path(folder) / "days"
+            root.mkdir()
+            legacy = {  # 旧版が保存した日：判定できない項目つき・何も分からない日・開始日より前の日
+                old_day: {"date": old_day.isoformat(), "sleep": {"state": "missing", "segments": []}, "pc": legacy_pc,
+                          "steps": None},
+                DAY: {"date": DAY.isoformat(), "sleep": {"state": "missing", "segments": []},
+                      "pc": {"state": "missing", "segments": []}, "steps": None},
+                unknown_day: build_record(unknown_day, pc(), None, []),
+                early_day: {"date": early_day.isoformat(), "sleep": {"state": "missing", "segments": []},
+                            "pc": {"state": "missing", "segments": []}, "steps": None},
+            }
+            for day, record in legacy.items():
+                (root / f"{day}.json").write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+            with (patch.object(build, "DAYS_DIR", root),
+                  patch.object(build.collect_pc, "collect", return_value={}),
+                  patch.object(build.collect_sleep, "collect", return_value=({}, []))):
+                records, rebuilt = build.collect_records([unknown_day, DAY], {"START_DATE": "2026-10-02"},
+                                                         DAY + timedelta(days=1))
+            self.assertEqual(rebuilt, [])
+            self.assertEqual([record["date"] for record in records], [old_day.isoformat()])
+            self.assertEqual(sorted(path.stem for path in root.glob("*.json")),
+                             [early_day.isoformat(), old_day.isoformat()])   # 開始日より前のファイルには触れない
+            saved = json.loads((root / f"{old_day}.json").read_text(encoding="utf-8"))
+            self.assertEqual(set(saved), {"date", "pc"})
+            self.assertEqual(saved["pc"]["state"], "ok")
+            self.assertNotIn("unknown", saved["pc"])
 
     def test_invalid_saved_record_is_preserved_even_when_recollected(self):
         from pathlib import Path
@@ -337,10 +380,7 @@ class SleepSegmentTests(unittest.TestCase):
 
 class RecordTests(unittest.TestCase):
     def daily(self, **overrides):
-        base = {"bed": "22:32", "wake": "07:16", "night": 524, "deep": 77, "light": 354, "rem": 93,
-                "in_bed": 60, "lower": 60, "upper": 60, "state": "確定", "note": None, "steps": 7971}
-        base.update(overrides)
-        return base
+        return daily(**{"in_bed": 60, **overrides})
 
     def test_record_keeps_notion_totals_and_flags_mismatch(self):
         sessions = [session("2026-11-10T01:00:00+09:00", "2026-11-10T02:00:00+09:00")]
@@ -352,18 +392,16 @@ class RecordTests(unittest.TestCase):
         mismatched = build_record(DAY, pc(), self.daily(in_bed=200, upper=200), sessions)
         self.assertIn("一致しません", mismatched["warnings"][0])
 
-    def test_missing_sources_are_not_turned_into_zero(self):
-        record = build_record(DAY, None, None, [])
-        self.assertEqual(record["sleep"], {"state": "missing", "segments": []})
-        self.assertEqual(record["pc"], {"state": "missing", "segments": []})
-        self.assertIsNone(record["steps"])
+    def test_day_without_any_known_value_is_not_recorded(self):
+        self.assertIsNone(build_record(DAY, None, None, []))
+        self.assertIsNone(build_record(DAY, None, {"state": "記録なし", "note": "元データなし", "steps": 3618}, []))
+        self.assertIsNone(build_record(DAY, None, {"state": "未同期", "lower": 400, "upper": 430}, []))
 
-    def test_no_record_day_has_no_numbers(self):
-        daily = {"state": "記録なし", "note": "元データなし", "steps": 3618}
-        sleep = build_record(DAY, pc(), daily, [])["sleep"]
-        self.assertEqual(sleep["state"], "none")
-        self.assertIsNone(sleep["lower"])
-        self.assertIsNone(sleep["upper"])
+    def test_unknown_side_is_left_out_instead_of_zero(self):
+        no_sleep = build_record(DAY, pc(), {"state": "記録なし", "note": "元データなし", "steps": 3618}, [])
+        self.assertEqual(set(no_sleep), {"date", "pc", "steps"})
+        no_pc = build_record(DAY, None, daily(), [])
+        self.assertEqual(set(no_pc), {"date", "sleep", "steps"})
 
     def test_pc_states_and_app_folding(self):
         record = build_record(DAY, pc(), None, [])["pc"]
@@ -374,9 +412,13 @@ class RecordTests(unittest.TestCase):
         self.assertEqual(record["segments"], [[540.0, 600.5, 60.0]])
         caution = build_record(DAY, pc(long_not_afk=True, longest_not_afk_seconds=30000.0), None, [])["pc"]
         self.assertEqual(caution["state"], "caution")
-        empty = build_record(DAY, pc(active_seconds=0.0, not_afk_seconds=0.0, afk_seconds=0.0,
-                                     unknown_seconds=86400.0, apps=[], spans=[], hours=[0.0] * 24), None, [])["pc"]
-        self.assertEqual(empty["state"], "none")
+        self.assertFalse({"unknown", "window_unknown"} & set(record))
+        empty = pc(active_seconds=0.0, not_afk_seconds=0.0, afk_seconds=0.0,
+                   unknown_seconds=86400.0, apps=[], spans=[], hours=[0.0] * 24)
+        self.assertIsNone(build_record(DAY, empty, None, []))
+        away = build_record(DAY, pc(active_seconds=0.0, not_afk_seconds=0.0, afk_seconds=3600.0, unknown_seconds=82800.0,
+                                    apps=[], spans=[], hours=[0.0] * 24), None, [])["pc"]
+        self.assertEqual((away["state"], away["active"]), ("ok", 0))   # 起動していて離席だった日は0分として記録する
 
     def test_gap_longer_than_a_minute_is_kept(self):
         self.assertEqual(pc_segments([[0, 600], [661, 1200]]), [[0.0, 10.0, 10.0], [11.0, 20.0, 9.0]])
@@ -389,8 +431,14 @@ class RecordTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_record(DAY, pc(active_seconds=90000.0, not_afk_seconds=90000.0), None, [])
         with self.assertRaises(ValueError):
-            validate({"date": "2026-11-10", "pc": {"state": "missing", "segments": []},
-                      "sleep": {"state": "confirmed", "segments": [[100, 50, "s"]]}})
+            validate({"date": "2026-11-10",
+                      "sleep": {"state": "confirmed", "lower": 60, "upper": 60, "segments": [[100, 50, "s"]]}})
+        for unknown in ({"date": "2026-11-10"}, {"date": "2026-11-10", "steps": 100},
+                        {"date": "2026-11-10", "pc": {"state": "missing", "segments": []}},
+                        {"date": "2026-11-10", "sleep": {"state": "none", "segments": []}},
+                        {"date": "2026-11-10", "sleep": {"state": "confirmed", "lower": None, "upper": 60, "segments": []}}):
+            with self.subTest(record=unknown), self.assertRaises(ValueError):
+                validate(unknown)
 
 
 class EncryptionTests(unittest.TestCase):
@@ -537,27 +585,47 @@ class UnknownValueTests(unittest.TestCase):
         self.assertIsNone(sleep_range({"state": "unsynced", "lower": 400, "upper": 430}))
         self.assertIsNone(sleep_range({"state": "missing"}))
 
-    def test_one_sided_sleep_is_reported(self):
-        daily = {"state": "一部不明", "lower": None, "upper": 430, "in_bed": None}
-        record = build_record(DAY, None, daily, [])
-        self.assertIn("不明として扱います", record["warnings"][0])
-        unknown = build_record(DAY, None, {"state": "集計中", "lower": 400, "upper": 430}, [])
-        self.assertEqual(unknown["sleep"]["state"], "missing")
+    def test_one_sided_or_unknown_sleep_is_not_recorded(self):
+        one_sided = build_record(DAY, pc(), {"state": "一部不明", "lower": None, "upper": 430, "in_bed": None}, [])
+        self.assertNotIn("sleep", one_sided)
+        self.assertNotIn("warnings", one_sided)
+        unknown = build_record(DAY, pc(), {"state": "集計中", "lower": 400, "upper": 430}, [])
+        self.assertNotIn("sleep", unknown)
 
-    def test_missing_window_records_make_the_pc_total_partial(self):
-        record = build_record(DAY, pc(not_afk_seconds=3600.4 + 601), None, [])["pc"]
-        self.assertEqual(record["state"], "partial")
-        self.assertEqual(build_record(DAY, pc(not_afk_seconds=3600.4 + 599), None, [])["pc"]["state"], "ok")
-        both = build_record(DAY, pc(not_afk_seconds=30000.0, long_not_afk=True), None, [])["pc"]
-        self.assertEqual(both["state"], "partial")
+    def test_only_the_recorded_pc_time_is_kept(self):
+        # 2時間だけ記録でき、残りは ActivityWatch が動いていなかった日：記録できた2時間だけがその日の値
+        two_hours = pc(active_seconds=7200.0, not_afk_seconds=7200.0, afk_seconds=0.0, unknown_seconds=79200.0,
+                       window_unknown_seconds=0.0, apps=[{"name": "app.exe", "seconds": 7200.0}],
+                       hours=[0.0] * 9 + [3600.0, 3600.0] + [0.0] * 13, spans=[[32400.0, 39600.0]],
+                       longest_not_afk_seconds=7200.0)
+        record = build_record(DAY, two_hours, None, [])["pc"]
+        self.assertEqual((record["state"], record["active"]), ("ok", 7200))
+        self.assertFalse({"unknown", "window_unknown"} & set(record))
+        gap = build_record(DAY, pc(not_afk_seconds=3600.4 + 2400, window_unknown_seconds=1800.0), None, [])["pc"]
+        self.assertEqual((gap["state"], gap["active"]), ("ok", 3600))
+        both = build_record(DAY, pc(not_afk_seconds=30000.0, long_not_afk=True, longest_not_afk_seconds=30000.0),
+                            None, [])["pc"]
+        self.assertEqual(both["state"], "caution")
 
-    def test_saved_records_get_the_current_judgement(self):
+    def test_saved_records_drop_what_could_not_be_judged(self):
         from pipeline.merge import refresh
-        saved = build_record(DAY, pc(), None, [])
-        saved["pc"]["not_afk"] = saved["pc"]["active"] + 5000
-        self.assertEqual(refresh(saved)["pc"]["state"], "partial")
-        untouched = build_record(DAY, None, None, [])
-        self.assertEqual(refresh(untouched)["pc"], {"state": "missing", "segments": []})
+        known_sleep = build_record(DAY, None, daily(), [])["sleep"]
+        legacy_pc = {**build_record(DAY, pc(), None, [])["pc"], "state": "partial", "unknown": 81700, "window_unknown": 900}
+        upgraded = refresh({"date": "2026-11-10", "sleep": known_sleep, "pc": legacy_pc, "steps": None,
+                            "warnings": ["睡眠時間の下限か上限が記録されていないため、睡眠時間を不明として扱います"]})
+        self.assertEqual(set(upgraded), {"date", "sleep", "pc"})
+        self.assertEqual(upgraded["pc"]["state"], "ok")
+        self.assertFalse({"unknown", "window_unknown"} & set(upgraded["pc"]))
+        validate(upgraded)
+        sleep_only = refresh({"date": "2026-11-10", "sleep": known_sleep, "pc": {"state": "missing", "segments": []},
+                              "steps": 10})
+        self.assertEqual(set(sleep_only), {"date", "sleep", "steps"})
+        pc_only = refresh({"date": "2026-11-10", "sleep": {"state": "none", "segments": [], "lower": None},
+                           "pc": {**legacy_pc, "state": "ok"}, "warnings": ["睡眠区間の合計が一致しません"]})
+        self.assertEqual(set(pc_only), {"date", "pc"})
+        nothing = refresh({"date": "2026-11-10", "sleep": {"state": "unsynced", "segments": []},
+                           "pc": {"state": "none", "segments": [], "active": 0}, "steps": 300})
+        self.assertIsNone(nothing)
 
     def test_merged_gap_is_not_counted_as_active_time(self):
         self.assertEqual(pc_segments([[0, 600], [660, 1200]]), [[0.0, 20.0, 19.0]])
@@ -567,7 +635,7 @@ class DatasetValidationTests(unittest.TestCase):
     """保存済みの日も含め、公開する全レコードを検証する。"""
 
     def record(self, day="2026-11-10"):
-        return build_record(date.fromisoformat(day), pc(), None, [])
+        return build_record(date.fromisoformat(day), pc(), daily(), [])
 
     def test_future_duplicate_and_early_records_stop_the_build(self):
         from pipeline.merge import validate_dataset
@@ -586,7 +654,7 @@ class DatasetValidationTests(unittest.TestCase):
             change(record)
             return record
         cases = [lambda r: r.update(date="2026-11-31"), lambda r: r.update(date="11/10"),
-                 lambda r: r.update(memo="x"), lambda r: r.pop("pc"),
+                 lambda r: r.update(memo="x"), lambda r: (r.pop("pc"), r.pop("sleep")),
                  lambda r: r["pc"].update(title="ウィンドウの題名"), lambda r: r["pc"].update(active="3600"),
                  lambda r: r["pc"].update(state="fine"), lambda r: r["pc"]["hours"].pop(),
                  lambda r: r["pc"]["apps"][0].update(url="x"), lambda r: r["pc"].update(segments=[[10, 20, 30]]),
@@ -731,10 +799,11 @@ class SampleTests(unittest.TestCase):
     def test_sample_is_deterministic_and_valid(self):
         first = sample.generate(date(2026, 11, 11))
         self.assertEqual(first, sample.generate(date(2026, 11, 11)))
-        self.assertEqual(len(first), 30)
+        self.assertEqual(len(first), 29)   # 睡眠もPCも分からない1日は記録しない
         self.assertEqual(first[-1]["date"], "2026-11-10")
-        states = {record["pc"]["state"] for record in first}
-        self.assertTrue({"ok", "caution", "partial", "missing"} <= states)
+        self.assertEqual({record["pc"]["state"] for record in first if "pc" in record}, {"ok", "caution"})
+        self.assertTrue(any("pc" not in record for record in first))
+        self.assertTrue(any("sleep" not in record for record in first))
 
 
 if __name__ == "__main__":

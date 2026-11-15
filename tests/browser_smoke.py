@@ -32,9 +32,11 @@ def main():
         sample_dist = root / "dist-sample"
         today = date(2025, 1, 31)
         days = sample.generate(today)
-        source = {"active_seconds": 0, "not_afk_seconds": 0, "afk_seconds": 0, "unknown_seconds": 86400,
-                  "window_seconds": 1800, "window_unknown_seconds": 1800, "longest_not_afk_seconds": 0,
-                  "long_not_afk": False, "hours": [0] * 24, "spans": [], "apps": []}
+        # 最終日：2時間だけ ActivityWatch が記録でき、睡眠は分からない日（睡眠は記録しない）
+        source = {"active_seconds": 7200, "not_afk_seconds": 7200, "afk_seconds": 0, "unknown_seconds": 79200,
+                  "window_seconds": 9000, "window_unknown_seconds": 1800, "longest_not_afk_seconds": 7200,
+                  "long_not_afk": False, "hours": [0] * 9 + [3600, 3600] + [0] * 13,
+                  "spans": [[32400, 39600]], "apps": [{"name": "synthetic.exe", "seconds": 7200}]}
         days[-1] = build_record(today - timedelta(days=1), source, None, [])
         with patch.object(build, "SAMPLE_DIST_DIR", sample_dist):
             build.write_dist(days, sample.PASSPHRASE, True, today)

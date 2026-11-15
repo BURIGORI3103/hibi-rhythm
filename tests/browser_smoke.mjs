@@ -53,13 +53,15 @@ try {
   await unlock(passphrase);
   await until('!!document.querySelector("#app:not([hidden])")');
   const mobile = await evaluate('({pc:document.querySelector("#pc-value").textContent,' +
+    ' sleep:document.querySelector("#sleep-value").textContent,' +
     ' detail:document.querySelector("#detail").textContent,' +
     ' sample:!document.querySelector("#sample-banner").hidden,' +
     ' noindex:document.querySelector("meta[name=robots]").content.includes("noindex"),' +
     ' local:localStorage.length, session:sessionStorage.length,' +
     ' viewport:innerWidth, documentWidth:document.documentElement.scrollWidth})');
-  assert.equal(mobile.pc, '一部欠測');
-  assert.match(mobile.detail, /操作中か離席かの判定がないアプリ記録/);
+  assert.equal(mobile.pc, '2時間0分');
+  assert.equal(mobile.sleep, '—');
+  assert.doesNotMatch(mobile.detail + mobile.pc + mobile.sleep, /未取得|記録なし|未同期|一部欠測|以上/);
   assert.equal(mobile.sample, true);
   assert.equal(mobile.noindex, true);
   assert.equal(mobile.local, 0);
@@ -70,11 +72,13 @@ try {
     const rowCount = () => document.querySelectorAll('#rhythm .row').length;
     const columns = () => [...document.querySelectorAll('#trend .cols')].map((item) => item.children.length);
     const pcChart = () => document.querySelectorAll('#trend .chart')[1];
+    const sleepChart = () => document.querySelectorAll('#trend .chart')[0];
     const start = { rows: rowCount(), columns: columns() };
     document.querySelector('[data-range="30"]').click();
     const thirty = { rows: rowCount(), columns: columns(), pressed: document.querySelector('[data-range="30"]').getAttribute('aria-pressed'),
       pcBars: pcChart().querySelectorAll('.bar-pc').length, average: pcChart().querySelector('.avg').textContent,
-      missingAtEnd: Boolean(pcChart().querySelector('.col:last-child .none-mark')) };
+      missingAtEnd: Boolean(sleepChart().querySelector('.col:last-child .none-mark')),
+      skippedDay: [...document.querySelectorAll('#rhythm .row')].some((row) => row.disabled) };
     const originalRow = document.querySelector('#rhythm .row');
     const originalChart = document.querySelector('#trend .chart');
     for (let i = 0; i < 4; i++) { document.querySelector('#prev').click(); document.querySelector('#next').click(); }
@@ -100,15 +104,16 @@ try {
   assert.deepEqual(render.thirty.columns, [30, 30]);
   assert.equal(render.thirty.pressed, 'true');
   assert.equal(render.thirty.missingAtEnd, true);
+  assert.equal(render.thirty.skippedDay, true);   // 何も分からない日は記録がなく、選べない
   assert.match(render.thirty.average, new RegExp('記録のある' + render.thirty.pcBars + '日'));
   assert.deepEqual(render.selectedCharts, [render.selected, render.selected]);
   assert.equal(render.end, 14);
   console.log('日付を往復したクリック処理の中央値: ' + render.median.toFixed(2) + 'ms / リズム表とグラフのDOMを保持: ' + render.retainsNodes);
   assert.equal(render.retainsNodes, true);
   await cdp('Emulation.clearDeviceMetricsOverride');
-  assert.equal(await evaluate('document.querySelector("#pc-value").textContent'), '一部欠測');
+  assert.equal(await evaluate('document.querySelector("#pc-value").textContent'), '2時間0分');
   assert.equal(await evaluate('!!document.querySelector("#day-dial svg")'), true);
-  console.log('Edge実行確認: モバイル390px、デスクトップ、誤った合言葉、WebCrypto復号、欠測表示、noindex、未記憶を検証');
+  console.log('Edge実行確認: モバイル390px、デスクトップ、誤った合言葉、WebCrypto復号、記録しない項目の表示、noindex、未記憶を検証');
 } finally {
   socket.close();
 }

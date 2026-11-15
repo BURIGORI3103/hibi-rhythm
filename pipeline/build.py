@@ -63,7 +63,9 @@ def load_saved(folder=DAYS_DIR):
             raise ValueError(f"保存済みレコード {path.name} を読めません（JSONとして壊れています）") from None
         if not isinstance(record, dict) or record.get("date") != path.stem:
             raise ValueError(f"保存済みレコード {path.name} のファイル名と中の日付が一致しません")
-        records.append(refresh(record))
+        record = refresh(record)   # 判定できない値は取り除く。何も残らない日は記録しない
+        if record is not None:
+            records.append(record)
     return records
 
 
@@ -78,19 +80,36 @@ def collect_records(days, env, today=None):
     pc = collect_pc.collect(days, env.get("ACTIVITYWATCH_PROJECT") or DEFAULT_ACTIVITYWATCH_PROJECT)
     daily, sessions = collect_sleep.collect(env.get("NOTION_TOKEN"), env.get("NOTION_HEALTH_DATA_SOURCE_ID"),
                                             env.get("NOTION_SLEEP_SESSION_DATA_SOURCE_ID"), days)
-    rebuilt = [build_record(day, pc.get(day.isoformat()), daily.get(day.isoformat()), sessions)
-               for day in tqdm(days, desc="日別レコードを統合", unit="日", file=sys.stderr)]
+    built = {day.isoformat(): build_record(day, pc.get(day.isoformat()), daily.get(day.isoformat()), sessions)
+             for day in tqdm(days, desc="日別レコードを統合", unit="日", file=sys.stderr)}
+    rebuilt = [record for record in built.values() if record is not None]
     validate_dataset(rebuilt, today, start)
     records = {record["date"]: record for record in saved}
-    if rebuilt:
+    for day, record in built.items():   # 睡眠もPCも分からなくなった日は、保存済みの分も記録から外す
+        if record is None:
+            records.pop(day, None)
+    # 取り直した日と、いまの基準に合わせて中身が変わった保存済みの日を書き直す
+    changed = [record for record in records.values()
+               if not (DAYS_DIR / f"{record['date']}.json").is_file()
+               or (DAYS_DIR / f"{record['date']}.json").read_text(encoding="utf-8") != day_text(record)]
+    for record in rebuilt:
+        records[record["date"]] = record
+    changed = {record["date"]: record for record in [*changed, *rebuilt]}
+    if changed:
         remove_tree(staging)
         staging.mkdir(parents=True)
-        for record in rebuilt:
-            name = f"{record['date']}.json"
-            atomic_write(staging / name, json.dumps(record, ensure_ascii=False, indent=1) + "\n")
-            records[record["date"]] = record
+        for day, record in changed.items():
+            atomic_write(staging / f"{day}.json", day_text(record))
         publish_staging(staging, DAYS_DIR, remove_extra=False)
+    # 記録しない日（判定できる値が何もない日）のファイルを消す。開始日より前のファイルには触れない
+    for path in sorted(DAYS_DIR.glob("*.json")) if DAYS_DIR.is_dir() else []:
+        if path.stem not in records and (start is None or path.stem >= start.isoformat()):
+            path.unlink()
     return list(records.values()), rebuilt
+
+
+def day_text(record):
+    return json.dumps(record, ensure_ascii=False, indent=1) + "\n"
 
 
 def write_dist(records, passphrase, is_sample, today, start=None):
@@ -212,20 +231,16 @@ def publish_staging(staging, target, *, remove_extra=True):
 
 
 def describe(record):
-    sleep, pc = record["sleep"], record["pc"]
-    span = sleep_range(sleep)
+    """記録した項目だけを表示する。記録しなかった側は「—」。"""
+    span = sleep_range(record.get("sleep"))
     if span is None:
-        sleep_text = {"none": "記録なし", "unsynced": "未同期", "missing": "未取得"}.get(sleep["state"], "一部欠測")
+        sleep_text = "—"
     elif span[0] == span[1]:
         sleep_text = f"{span[1]}分"
     else:
         sleep_text = f"{span[0]}〜{span[1]}分"
-    if pc["state"] in ("missing", "none"):
-        pc_text = "未取得" if pc["state"] == "missing" else "記録なし"
-    elif pc["state"] == "partial" and pc["active"] == 0:
-        pc_text = "一部欠測"
-    else:
-        pc_text = f"{pc['active'] // 60}分" + {"caution": "（参考値）", "partial": "以上（一部欠測）"}.get(pc["state"], "")
+    pc = record.get("pc")
+    pc_text = "—" if pc is None else f"{pc['active'] // 60}分" + ("（参考値）" if pc["state"] == "caution" else "")
     return f"  {record['date']}  睡眠 {sleep_text} ／ PC {pc_text}"
 
 

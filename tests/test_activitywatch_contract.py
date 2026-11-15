@@ -55,9 +55,8 @@ class ActivityWatchContractTests(unittest.TestCase):
         record = build_record(day, parse_export(result.stdout, [day])[day.isoformat()], None, [])
         self.assertEqual(record["pc"]["active"], 120)
         self.assertEqual(record["pc"]["afk"], 120)
-        self.assertEqual(record["pc"]["unknown"], 86160)
-        self.assertEqual(record["pc"]["window_unknown"], 1560)
+        self.assertFalse({"unknown", "window_unknown"} & set(record["pc"]))   # 記録できなかった時間は持たない
         self.assertEqual(record["pc"]["segments"], [[0, 2, 2]])
         self.assertEqual(record["pc"]["apps"], [{"name": "Synthetic game", "seconds": 120}])
-        self.assertEqual(record["pc"]["state"], "partial")
-        self.assertEqual(record["sleep"]["state"], "missing")
+        self.assertEqual(record["pc"]["state"], "ok")
+        self.assertNotIn("sleep", record)
