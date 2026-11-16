@@ -65,7 +65,7 @@ summary: 睡眠とPC利用時間を1日単位で並べ、合言葉つきの静�
 
 ### 自動運用
 
-- Windows タスク `HibiRhythm-Daily` が毎日 20:00（日本時間）に `run_daily.ps1` を実行する。13:00 の睡眠データ取り込みより後に動かす。
+- Windows タスク `HibiRhythm-Daily` が毎日 14:00（日本時間）に `run_daily.ps1` を実行する。13:00 の睡眠データ取り込みより後に動かす。
 - 実行結果は `.state/` に残す。
 
 ## 構成
