@@ -4,6 +4,7 @@
   'use strict';
 
   const STORE_KEY = 'hibi-rhythm-passphrase';
+  const THEME_KEY = 'hibi-rhythm-theme';
   const DOW = ['日', '月', '火', '水', '木', '金', '土'];
   const BLANK = '—';   // 記録していない（判定できなかった）項目。理由は書かない
   const state = { days: [], byDate: new Map(), index: 0, range: 14 };
@@ -449,7 +450,7 @@ ${clock(a)}〜${clock(b)}${amount}`));
   function renderPeriod() {
     renderRhythm();
     renderTrend();
-    document.querySelectorAll('.seg button').forEach((button) => {
+    document.querySelectorAll('.seg button[data-range]').forEach((button) => {
       button.setAttribute('aria-pressed', String(Number(button.dataset.range) === state.range));
     });
   }
@@ -591,6 +592,35 @@ ${clock(a)}〜${clock(b)}${amount}`));
     });
   }
 
+  /* ---------- 画面の明るさ ----------
+     ライト／ダークの選択だけを localStorage に残す（合言葉とは別）。未選択なら端末の設定に従う。 */
+  const darkQuery = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+  function savedTheme() {
+    try {
+      const value = localStorage.getItem(THEME_KEY);
+      return value === 'light' || value === 'dark' ? value : null;
+    } catch (error) { return null; }
+  }
+  function applyTheme(choice) {
+    if (choice) document.documentElement.dataset.theme = choice;
+    else delete document.documentElement.dataset.theme;
+    const current = choice || (darkQuery && darkQuery.matches ? 'dark' : 'light');
+    document.querySelectorAll('[data-theme-choice]').forEach((button) => {
+      button.setAttribute('aria-pressed', String(button.dataset.themeChoice === current));
+    });
+  }
+  applyTheme(savedTheme());
+  document.querySelectorAll('[data-theme-choice]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const choice = button.dataset.themeChoice;
+      try { localStorage.setItem(THEME_KEY, choice); } catch (error) { /* 保存できなくても今の表示は切り替える */ }
+      applyTheme(choice);
+    });
+  });
+  if (darkQuery && darkQuery.addEventListener) {
+    darkQuery.addEventListener('change', () => applyTheme(savedTheme()));
+  }
+
   /* ---------- 操作 ---------- */
   $('prev').addEventListener('click', () => select(state.days[Math.max(state.index - 1, 0)].date));
   $('next').addEventListener('click', () => select(state.days[Math.min(state.index + 1, state.days.length - 1)].date));
@@ -598,7 +628,7 @@ ${clock(a)}〜${clock(b)}${amount}`));
     store.clear();
     location.reload();
   });
-  document.querySelectorAll('.seg button').forEach((button) => {
+  document.querySelectorAll('.seg button[data-range]').forEach((button) => {
     button.addEventListener('click', () => {
       const range = Number(button.dataset.range);
       if (range === state.range) return;

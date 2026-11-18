@@ -14,6 +14,10 @@
 <body>
 
 <main id="gate" class="gate" hidden>
+  <div class="seg theme-seg theme-seg-gate" role="group" aria-label="画面の明るさ">
+    <button type="button" data-theme-choice="light">ライト</button>
+    <button type="button" data-theme-choice="dark">ダーク</button>
+  </div>
   <form id="gate-form" class="gate-card" autocomplete="off">
     <svg class="gate-dial" viewBox="0 0 240 240" aria-hidden="true">
       <circle class="dial-track track-sleep" cx="120" cy="120" r="86"/>
@@ -45,6 +49,10 @@
     </div>
     <div class="top-meta">
       <span id="updated"></span>
+      <div class="seg theme-seg" role="group" aria-label="画面の明るさ">
+        <button type="button" data-theme-choice="light">ライト</button>
+        <button type="button" data-theme-choice="dark">ダーク</button>
+      </div>
       <button id="lock" type="button" class="ghost">ロックする</button>
     </div>
   </header>

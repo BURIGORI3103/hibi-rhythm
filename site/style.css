@@ -26,8 +26,9 @@
   --font: "BIZ UDPGothic", "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic UI", Meiryo, system-ui, sans-serif;
   --font-num: "Bahnschrift", "DIN Alternate", "DIN Condensed", "Roboto Condensed", "BIZ UDPGothic", "Hiragino Sans", sans-serif;
 }
+/* 画面右上の切り替えで data-theme を付ける。未選択なら端末の設定に従う */
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     color-scheme: dark;
     --page: #10132a;
     --surface: #181c38;
@@ -50,6 +51,29 @@
     --error: #f08aa6;
     --focus: #b9bcff;
   }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #10132a;
+  --surface: #181c38;
+  --ink: #e8eaf5;
+  --ink-2: #b4b8cf;
+  --muted: #868ba6;
+  --grid: #262b4a;
+  --axis: #3a4066;
+  --track: #232847;
+  --wash: rgba(232, 234, 245, 0.06);
+  --sleep: #8d92f2;
+  --sleep-soft: #33387a;
+  --sleep-hatch: #8d92f2;
+  --pc: #f2a541;
+  --stage-deep: #5a5fc4;
+  --stage-rem: #8d92f2;
+  --stage-light: #c4c6ec;
+  --warn: #e86a8c;
+  --warn-ink: #10132a;
+  --error: #f08aa6;
+  --focus: #b9bcff;
 }
 
 * { box-sizing: border-box; }
@@ -117,10 +141,10 @@ button { font: inherit; color: inherit; }
 .top { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
 .top h1 { font-size: 20px; font-weight: 700; letter-spacing: 0.08em; line-height: 1.3; }
 .sub { color: var(--muted); font-size: 12px; }
-.top-meta { display: flex; align-items: center; gap: 14px; color: var(--muted); font-size: 12px; }
+.top-meta { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px 14px; color: var(--muted); font-size: 12px; }
 .ghost {
   background: none; border: 1px solid var(--axis); border-radius: 999px; padding: 4px 12px;
-  font-size: 12px; color: var(--ink-2); cursor: pointer;
+  font-size: 12px; color: var(--ink-2); cursor: pointer; white-space: nowrap;
 }
 .ghost:hover { background: var(--wash); }
 .banner {
@@ -219,6 +243,8 @@ button { font: inherit; color: inherit; }
 .seg { display: inline-flex; border: 1px solid var(--axis); border-radius: 999px; padding: 2px; }
 .seg button { border: 0; background: none; padding: 3px 14px; font-size: 12px; cursor: pointer; color: var(--ink-2); border-radius: 999px; }
 .seg button[aria-pressed="true"] { background: var(--ink); color: var(--page); font-weight: 700; }
+.theme-seg button { padding: 2px 12px; white-space: nowrap; }
+.theme-seg-gate { position: fixed; top: 16px; right: 16px; }
 .rhythm { margin-top: 14px; display: grid; }
 .rhythm-head, .row { display: grid; grid-template-columns: 58px minmax(0, 1fr) 104px; column-gap: 12px; align-items: center; }
 .rhythm-head { padding: 0 8px 4px; }
@@ -296,7 +322,7 @@ th { color: var(--ink-2); font-weight: 700; font-size: 12px; }
 }
 
 @media print {
-  :root {
+  :root, :root[data-theme] {
     color-scheme: light;
     --page: #fff; --surface: #fff; --ink: #000; --ink-2: #333; --muted: #666; --grid: #ddd; --axis: #999;
     --track: #eee; --wash: transparent; --sleep: #3b3f9e; --sleep-soft: #c4c6ec; --sleep-hatch: #3b3f9e; --pc: #e08a1e;
