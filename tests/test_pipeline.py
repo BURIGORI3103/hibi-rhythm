@@ -312,6 +312,34 @@ with (patch.object(build, "DAYS_DIR", root),
             self.assertEqual(saved["pc"]["state"], "ok")
             self.assertNotIn("unknown", saved["pc"])
 
+    def test_unrecognized_saved_record_outside_window_is_preserved(self):
+        # 2026-11-18 レビュー指摘16: 日付は正しいが睡眠・PCの項目を識別できないファイルを、
+        # 再収集期間外でも欠測扱いで消さない（原本を残して止める）
+        from datetime import timedelta
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+        from unittest.mock import patch
+        from pipeline import build
+
+        odd_day = DAY - timedelta(days=5)
+        with TemporaryDirectory() as folder:
+            root = Path(folder) / "days"
+            root.mkdir()
+            odd = root / f"{odd_day}.json"
+            odd_text = json.dumps({"date": odd_day.isoformat(), "rest": {"minutes": 420}, "screen": 3600},
+                                  ensure_ascii=False)
+            odd.write_text(odd_text, encoding="utf-8")
+            kept = root / f"{DAY - timedelta(days=3)}.json"
+            kept_text = json.dumps(build_record(DAY - timedelta(days=3), pc(), None, []), ensure_ascii=False)
+            kept.write_text(kept_text, encoding="utf-8")
+            with (patch.object(build, "DAYS_DIR", root),
+                  patch.object(build.collect_pc, "collect", return_value={}),
+                  patch.object(build.collect_sleep, "collect", return_value=({}, []))):
+                with self.assertRaisesRegex(ValueError, "識別できない"):
+                    build.collect_records([DAY], {"START_DATE": "2026-10-02"}, DAY + timedelta(days=1))
+            self.assertEqual(odd.read_text(encoding="utf-8"), odd_text)
+            self.assertEqual(kept.read_text(encoding="utf-8"), kept_text)
+
     def test_invalid_saved_record_is_preserved_even_when_recollected(self):
         from pathlib import Path
         from tempfile import TemporaryDirectory

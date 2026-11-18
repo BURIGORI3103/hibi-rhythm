@@ -53,8 +53,12 @@ def within(records, start):
     return [record for record in records if start is None or record["date"] >= start.isoformat()]
 
 
-def load_saved(folder=DAYS_DIR):
-    """data/days/ の保存済みレコードを読む。ファイル名と中の日付が食い違うものは受け付けない。"""
+def load_saved(folder=DAYS_DIR, empty_days=None):
+    """data/days/ の保存済みレコードを読む。ファイル名と中の日付が食い違うものは受け付けない。
+
+    睡眠・PCの項目を1つも持たない形式は、旧版の欠測とも区別できないため原本を残して止める。
+    既知の形式で判定できる値が何も残らない日は記録せず、その日付を empty_days（指定時）へ加える。
+    """
     records = []
     for path in sorted(folder.glob("*.json")):
         try:
@@ -63,9 +67,13 @@ def load_saved(folder=DAYS_DIR):
             raise ValueError(f"保存済みレコード {path.name} を読めません（JSONとして壊れています）") from None
         if not isinstance(record, dict) or record.get("date") != path.stem:
             raise ValueError(f"保存済みレコード {path.name} のファイル名と中の日付が一致しません")
-        record = refresh(record)   # 判定できない値は取り除く。何も残らない日は記録しない
-        if record is not None:
-            records.append(record)
+        if "sleep" not in record and "pc" not in record:
+            raise ValueError(f"保存済みレコード {path.name} は睡眠・PCの項目を識別できない形式です（原本を残して中止しました）")
+        refreshed = refresh(record)   # 判定できない値は取り除く。何も残らない日は記録しない
+        if refreshed is not None:
+            records.append(refreshed)
+        elif empty_days is not None:
+            empty_days.add(path.stem)
     return records
 
 
@@ -75,7 +83,8 @@ def collect_records(days, env, today=None):
     start = start_date(env)
     staging = DAYS_DIR.with_name(DAYS_DIR.name + ".tmp")
     restore_previous(staging, DAYS_DIR)
-    saved = within(load_saved(DAYS_DIR), start)
+    empty_saved_days = set()
+    saved = within(load_saved(DAYS_DIR, empty_saved_days), start)
     validate_dataset(saved, today, start)
     pc = collect_pc.collect(days, env.get("ACTIVITYWATCH_PROJECT") or DEFAULT_ACTIVITYWATCH_PROJECT)
     daily, sessions = collect_sleep.collect(env.get("NOTION_TOKEN"), env.get("NOTION_HEALTH_DATA_SOURCE_ID"),
@@ -101,9 +110,12 @@ def collect_records(days, env, today=None):
         for day, record in changed.items():
             atomic_write(staging / f"{day}.json", day_text(record))
         publish_staging(staging, DAYS_DIR, remove_extra=False)
-    # 記録しない日（判定できる値が何もない日）のファイルを消す。開始日より前のファイルには触れない
+    # 記録しない日（判定できる値が何もない日）のファイルを消す。開始日より前のファイルには触れない。
+    # 消してよいのは、取り直して記録不要と分かった日と、既知の形式で検証済みの空の日だけに限る。
+    removable = empty_saved_days | {day for day, record in built.items() if record is None}
     for path in sorted(DAYS_DIR.glob("*.json")) if DAYS_DIR.is_dir() else []:
-        if path.stem not in records and (start is None or path.stem >= start.isoformat()):
+        if (path.stem in removable and path.stem not in records
+                and (start is None or path.stem >= start.isoformat())):
             path.unlink()
     return list(records.values()), rebuilt
 
