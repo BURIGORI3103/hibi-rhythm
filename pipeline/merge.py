@@ -271,7 +271,9 @@ def validate_pc(day, pc):
     require(pc.get("state") in PC_STATE_VALUES, day, f"PCの状態が不正です（{pc.get('state')!r}）")
     require(set(pc) == PC_KEYS, day, "PCの項目が想定と違います")
     for name in PC_TOTALS:
-        require(is_number(pc[name]) and 0 <= pc[name] <= 86400, day, f"PCの{name}が0〜86400秒の範囲外です（{pc[name]!r}）")
+        # 最長連続は日をまたいで前後 LONG_NOT_AFK_SECONDS ずつ広げて数える（ActivityWarch）ため、24時間を超えうる
+        limit = 86400 + 2 * LONG_NOT_AFK_SECONDS if name == "longest_not_afk" else 86400
+        require(is_number(pc[name]) and 0 <= pc[name] <= limit, day, f"PCの{name}が0〜{limit}秒の範囲外です（{pc[name]!r}）")
     require(pc["active"] <= pc["not_afk"] + 1, day, "PC稼働判定がnot-afk時間を超えています")
     require(pc_recorded(pc), day, "記録できた時間のないPCレコードです")
     require(isinstance(pc["hours"], list) and len(pc["hours"]) == 24

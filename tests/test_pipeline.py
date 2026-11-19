@@ -440,6 +440,10 @@ class RecordTests(unittest.TestCase):
         self.assertEqual(record["segments"], [[540.0, 600.5, 60.0]])
         caution = build_record(DAY, pc(long_not_afk=True, longest_not_afk_seconds=30000.0), None, [])["pc"]
         self.assertEqual(caution["state"], "caution")
+        # ActivityWarch は日をまたぐ連続を前後6時間広げて数えるため、最長連続は24時間を超えうる（最大36時間）
+        over_day = build_record(DAY, pc(long_not_afk=True, longest_not_afk_seconds=100000.0), None, [])
+        validate(over_day)
+        self.assertEqual(over_day["pc"]["longest_not_afk"], 100000)
         self.assertFalse({"unknown", "window_unknown"} & set(record))
         empty = pc(active_seconds=0.0, not_afk_seconds=0.0, afk_seconds=0.0,
                    unknown_seconds=86400.0, apps=[], spans=[], hours=[0.0] * 24)
