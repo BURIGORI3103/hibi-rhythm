@@ -73,7 +73,9 @@ try {
     const columns = () => [...document.querySelectorAll('#trend .cols')].map((item) => item.children.length);
     const pcChart = () => document.querySelectorAll('#trend .chart')[1];
     const sleepChart = () => document.querySelectorAll('#trend .chart')[0];
-    const start = { rows: rowCount(), columns: columns() };
+    const firstRow = document.querySelector('#rhythm .row');
+    const start = { rows: rowCount(), columns: columns(), firstDate: firstRow.querySelector('.row-date').firstChild.textContent,
+      firstDisabled: firstRow.disabled };
     document.querySelector('[data-range="30"]').click();
     const thirty = { rows: rowCount(), columns: columns(), pressed: document.querySelector('[data-range="30"]').getAttribute('aria-pressed'),
       pcBars: pcChart().querySelectorAll('.bar-pc').length, average: pcChart().querySelector('.avg').textContent,
@@ -91,15 +93,30 @@ try {
     }
     const retainsNodes = originalRow === document.querySelector('#rhythm .row') &&
       originalChart === document.querySelector('#trend .chart');
-    document.querySelector('#rhythm .row:nth-child(3)').click();
+    const scrollBefore = scrollY;
+    document.querySelector('#rhythm .row[data-date="2025-01-25"]').click();
+    const brief = { pc: document.querySelector('#pc-value').textContent,
+      row: document.querySelector('#rhythm .row[data-date="2025-01-25"] .row-totals').textContent,
+      jumpAfterRow: document.querySelector('#rhythm .row[data-date="2025-01-25"]').nextElementSibling?.className,
+      kept: scrollY === scrollBefore };
+    document.querySelector('#rhythm .row[data-date="2025-01-27"]').click();
     const selected = document.querySelector('#rhythm [aria-current="date"]')?.dataset.date;
     const selectedCharts = [...document.querySelectorAll('#trend .col.is-selected')].map((node) => node.dataset.date);
     document.querySelector('#next').click();
     document.querySelector('[data-range="14"]').click();
-    return {start, thirty, retainsNodes, selected, selectedCharts, end: rowCount(),
+    const dialKey = document.querySelector('#day-dial .dial-key')?.textContent;
+    const spans = document.querySelector('#detail details.spans summary')?.textContent;
+    return {start, thirty, brief, dialKey, spans, retainsNodes, selected, selectedCharts, end: rowCount(),
       median: measurements.sort((a, b) => a - b)[15]};
   })()`);
-  assert.deepEqual(render.start, { rows: 14, columns: [14, 14] });
+  // 直近3日に記録がなくても、14日の終点はビルド対象の最終日（1/30）のまま
+  assert.deepEqual(render.start, { rows: 14, columns: [14, 14], firstDate: '1/30', firstDisabled: true });
+  assert.equal(render.brief.pc, '1分未満');
+  assert.match(render.brief.row, /PC1分未満/);
+  assert.equal(render.brief.jumpAfterRow, 'jump');
+  assert.equal(render.brief.kept, true);
+  assert.equal(render.dialKey, '外側は睡眠内側はPC');
+  assert.match(render.spans, /PC稼働の区間（\d+区間）/);
   assert.equal(render.thirty.rows, 30);
   assert.deepEqual(render.thirty.columns, [30, 30]);
   assert.equal(render.thirty.pressed, 'true');

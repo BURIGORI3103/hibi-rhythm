@@ -840,3 +840,90 @@ class SampleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReviewRegressionTests(unittest.TestCase):
+    """2026-11-22 のレビュー指摘の再発防止（合成データのみ）。"""
+
+    def test_corrupt_saved_day_is_not_mistaken_for_empty_and_is_kept(self):
+        import tempfile
+        from datetime import timedelta
+        from pathlib import Path
+        from unittest.mock import patch
+        from pipeline import build
+        from pipeline.merge import refresh
+        corrupt = {"date": DAY.isoformat(), "pc": {**build_record(DAY, pc(), None, [])["pc"],
+                                                    "active": -60, "not_afk": -60, "afk": 0}}
+        with self.assertRaises(ValueError):
+            refresh(corrupt)
+        legacy_empty = {"date": DAY.isoformat(), "pc": {**build_record(DAY, pc(), None, [])["pc"],
+                                                         "state": "partial", "active": 0, "not_afk": 0, "afk": 0,
+                                                         "unknown": 86400}}
+        self.assertIsNone(refresh(legacy_empty))   # 正しい形式で0秒の日は従来どおり記録しない
+        with self.assertRaises(ValueError):
+            refresh({"date": DAY.isoformat(), "sleep": {"state": "confirmed", "segments": [], "lower": -5}})
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder) / "days"
+            root.mkdir()
+            original = json.dumps(corrupt, ensure_ascii=False)
+            (root / f"{DAY}.json").write_text(original, encoding="utf-8")
+            later = DAY + timedelta(days=30)   # 再収集期間の外
+            with (patch.object(build, "DAYS_DIR", root),
+                  patch.object(build.collect_pc, "collect", return_value={}),
+                  patch.object(build.collect_sleep, "collect", return_value=({}, []))):
+                with self.assertRaises(ValueError):
+                    build.collect_records([later - timedelta(days=1)], {}, later)
+            self.assertEqual((root / f"{DAY}.json").read_text(encoding="utf-8"), original)
+
+    def test_failed_second_deletion_restores_the_first(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from pipeline.build import publish_staging, remove_tree, restore_previous
+        with tempfile.TemporaryDirectory() as folder:
+            staging, target = Path(folder) / "days.tmp", Path(folder) / "days"
+            staging.mkdir()
+            target.mkdir()
+            for name in ("2026-11-09.json", "2026-11-10.json", "keep.json"):
+                (target / name).write_text(name, encoding="utf-8")
+            replace = os.replace
+
+            def locked_second(source, destination):
+                if Path(source).name == "2026-11-10.json" and Path(destination).parent.name == ".removed":
+                    raise PermissionError("合成したファイルロック")
+                replace(source, destination)
+
+            with patch("pipeline.build.os.replace", side_effect=locked_second):
+                with self.assertRaises(PermissionError):
+                    publish_staging(staging, target, remove_extra=False, remove=["2026-11-09.json", "2026-11-10.json"])
+            self.assertEqual(sorted(path.name for path in target.iterdir()),
+                             ["2026-11-09.json", "2026-11-10.json", "keep.json"])
+            self.assertFalse((staging / ".pending").exists())
+            restore_previous(staging, target)   # 復旧済みなので何もしない
+            remove_tree(staging)   # 次のビルドは一時フォルダを作り直してから再試行する
+            staging.mkdir()
+            publish_staging(staging, target, remove_extra=False, remove=["2026-11-09.json", "2026-11-10.json"])
+            self.assertEqual(sorted(path.name for path in target.iterdir()), ["keep.json"])
+
+    def test_session_verdict_column_is_checked_only_inside_the_period(self):
+        def rich(value):
+            return {"type": "rich_text", "rich_text": [{"plain_text": value}]}
+        outside = {"properties": {"開始日時": rich("2026-10-01T22:00:00+09:00"), "終了日時": rich("2026-10-02T06:00:00+09:00")}}
+        inside = {"properties": {"開始日時": rich("2026-11-09T22:00:00+09:00"), "終了日時": rich("2026-11-10T06:00:00+09:00")}}
+        sessions, _ = parse_sessions([outside], [DAY])
+        self.assertEqual(sessions, [])
+        with self.assertRaises(CollectError):
+            parse_sessions([inside], [DAY])
+
+    def test_dataset_carries_the_last_built_day(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from pipeline import build
+        today = date(2026, 11, 20)
+        with tempfile.TemporaryDirectory() as folder, patch.object(build, "SAMPLE_DIST_DIR", Path(folder) / "out"):
+            build.write_dist([build_record(DAY, pc(), None, [])], sample.PASSPHRASE, True, today)
+            envelope = json.loads((Path(folder) / "out" / build.DATA_FILE).read_text(encoding="utf-8"))
+        dataset = json.loads(encrypt.decrypt(envelope, sample.PASSPHRASE))
+        self.assertEqual(dataset["end"], "2026-11-19")   # 記録の最終日（11/10）ではなく、ビルド対象の最終日

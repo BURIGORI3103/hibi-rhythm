@@ -9,7 +9,7 @@
 
 import argparse
 from contextlib import contextmanager
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 import json
 import os
 import shutil
@@ -104,19 +104,19 @@ def collect_records(days, env, today=None):
     for record in rebuilt:
         records[record["date"]] = record
     changed = {record["date"]: record for record in [*changed, *rebuilt]}
-    if changed:
+    # 記録しない日（判定できる値が何もない日）のファイルを消す。開始日より前のファイルには触れない。
+    # 消してよいのは、取り直して記録不要と分かった日と、既知の形式で検証済みの空の日だけに限る。
+    # 削除も書き換えと同じ置き換えで行い、途中で失敗したら消した分も元に戻す。
+    removable = empty_saved_days | {day for day, record in built.items() if record is None}
+    removed = [path.name for path in (sorted(DAYS_DIR.glob("*.json")) if DAYS_DIR.is_dir() else [])
+               if path.stem in removable and path.stem not in records
+               and (start is None or path.stem >= start.isoformat())]
+    if changed or removed:
         remove_tree(staging)
         staging.mkdir(parents=True)
         for day, record in changed.items():
             atomic_write(staging / f"{day}.json", day_text(record))
-        publish_staging(staging, DAYS_DIR, remove_extra=False)
-    # 記録しない日（判定できる値が何もない日）のファイルを消す。開始日より前のファイルには触れない。
-    # 消してよいのは、取り直して記録不要と分かった日と、既知の形式で検証済みの空の日だけに限る。
-    removable = empty_saved_days | {day for day, record in built.items() if record is None}
-    for path in sorted(DAYS_DIR.glob("*.json")) if DAYS_DIR.is_dir() else []:
-        if (path.stem in removable and path.stem not in records
-                and (start is None or path.stem >= start.isoformat())):
-            path.unlink()
+        publish_staging(staging, DAYS_DIR, remove_extra=False, remove=removed)
     return list(records.values()), rebuilt
 
 
@@ -131,8 +131,10 @@ def write_dist(records, passphrase, is_sample, today, start=None):
     画面確認用のビルドが公開用の一式を上書きすることはない。呼び出し元が出力先をロックする。
     """
     validate_dataset(records, today, start)   # 今回作った日だけでなく、保存済みの日も含めた全件
+    # end はビルド対象の最終日（前日）。画面は記録の有無にかかわらず、ここを14日・30日の終点にする
     dataset = {"schema": SCHEMA_VERSION, "timezone": TIMEZONE_NAME, "sample": is_sample,
                "generated_at": datetime.now(JST).isoformat(timespec="seconds"),
+               "end": (today - timedelta(days=1)).isoformat(),
                "days": sorted(records, key=lambda record: record["date"])}
     plaintext = json.dumps(dataset, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
     envelope = encrypt.encrypt(plaintext, passphrase)
@@ -214,13 +216,17 @@ def restore_previous(staging, target):
     pending.unlink()
 
 
-def publish_staging(staging, target, *, remove_extra=True):
-    """target フォルダを残し、置き換え途中で失敗した場合は旧版を復元する。"""
+def publish_staging(staging, target, *, remove_extra=True, remove=()):
+    """target フォルダを残し、置き換え途中で失敗した場合は旧版を復元する。
+
+    remove_extra=False のときは staging にあるファイルだけを置き換え、remove に挙げたファイルだけを消す。
+    消すファイルも置き換えと同じく退避してから動かすため、途中で失敗すれば元に戻る。
+    """
     target.mkdir(parents=True, exist_ok=True)
     names = sorted(path.name for path in staging.iterdir())
     existing = {path.name: path for path in target.iterdir()}
     if not remove_extra:
-        existing = {name: existing[name] for name in names if name in existing}
+        existing = {name: existing[name] for name in [*names, *remove] if name in existing}
     previous, removed = staging / ".previous", staging / ".removed"
     previous.mkdir()
     removed.mkdir()

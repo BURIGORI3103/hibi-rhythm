@@ -6,7 +6,7 @@
   --surface: #f8f9fb;
   --ink: #1a2036;
   --ink-2: #4a5068;
-  --muted: #7d8399;
+  --muted: #5f6680;
   --grid: #dcdfe8;
   --axis: #b9bdcc;
   --track: #e2e5ee;
@@ -15,6 +15,7 @@
   --sleep-soft: #c4c6ec;
   --sleep-hatch: #3b3f9e;
   --pc: #e08a1e;
+  --pc-edge: #9a5608;
   --stage-deep: #262a73;
   --stage-rem: #5a5fc4;
   --stage-light: #a9acea;
@@ -26,8 +27,8 @@
   --font: "BIZ UDPGothic", "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Noto Sans JP", "Yu Gothic UI", Meiryo, system-ui, sans-serif;
   --font-num: "Bahnschrift", "DIN Alternate", "DIN Condensed", "Roboto Condensed", "BIZ UDPGothic", "Hiragino Sans", sans-serif;
 }
-/* 画面右上の切り替えで data-theme を付ける。未選択なら端末の設定に従う */
-@media (prefers-color-scheme: dark) {
+/* 画面右上の切り替えで data-theme を付ける。未選択なら端末の設定に従う（画面表示だけ。印刷は常にライト） */
+@media screen and (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     color-scheme: dark;
     --page: #10132a;
@@ -43,6 +44,7 @@
     --sleep-soft: #33387a;
     --sleep-hatch: #8d92f2;
     --pc: #f2a541;
+    --pc-edge: #f2a541;
     --stage-deep: #5a5fc4;
     --stage-rem: #8d92f2;
     --stage-light: #c4c6ec;
@@ -67,6 +69,7 @@
   --sleep-soft: #33387a;
   --sleep-hatch: #8d92f2;
   --pc: #f2a541;
+  --pc-edge: #f2a541;
   --stage-deep: #5a5fc4;
   --stage-rem: #8d92f2;
   --stage-light: #c4c6ec;
@@ -104,10 +107,14 @@ button { font: inherit; color: inherit; }
 .arc-sleep { stroke: var(--sleep); stroke-width: 22; }
 .arc-soft { stroke: url(#dial-hatch); stroke-width: 22; }
 .arc-pc { stroke: var(--pc); stroke-width: 14; }
+.arc-pc-edge { fill: none; stroke: var(--pc-edge); stroke-width: 1; pointer-events: none; }
 .arc:hover { stroke-width: 26; }
 .arc-pc:hover { stroke-width: 18; }
 .hatch-bg { fill: var(--sleep-soft); }
 .hatch-line { fill: var(--sleep-hatch); }
+
+.dial-key { display: flex; justify-content: center; flex-wrap: wrap; gap: 2px 14px; margin-top: 6px; font-size: 12px; color: var(--ink-2); }
+.dial-key > span { display: inline-flex; align-items: center; gap: 6px; }
 
 /* ---------- 合言葉の入力 ---------- */
 .gate { min-height: 100vh; display: grid; place-items: center; padding: 24px 16px; }
@@ -221,13 +228,22 @@ button { font: inherit; color: inherit; }
 .caveat p { overflow-wrap: anywhere; }
 .caveat summary { font-weight: 700; }
 .empty { color: var(--muted); font-size: 13px; }
+.spans { margin-top: 12px; font-size: 13px; }
+.spans summary { font-size: 13px; color: var(--ink-2); }
+.spans ul { list-style: none; padding: 0; margin: 6px 0 0; display: grid; gap: 2px; font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+.jump {
+  justify-self: end; margin: 2px 8px 6px; padding: 4px 14px; border: 1px solid var(--sleep); border-radius: 999px;
+  background: var(--surface); color: var(--ink); font-size: 12px; font-weight: 700; cursor: pointer;
+}
+#trend .jump { display: block; margin: 8px 0 0 auto; }
+.jump:hover { background: var(--wash); }
 
 /* ---------- タイムライン（0〜24時の帯） ---------- */
 .lanes { position: relative; display: grid; gap: 2px; }
 .lane { position: relative; display: block; height: 8px; background: var(--track); border-radius: 2px; overflow: hidden; }
 .blk { position: absolute; top: 0; bottom: 0; min-width: 1px; display: block; }
 .blk.is-sleep { background-color: var(--sleep); }
-.blk.is-pc { background-color: var(--pc); }
+.blk.is-pc { background-color: var(--pc); box-shadow: inset 0 0 0 1px var(--pc-edge); }
 .lanes::before {
   /* 6時間ごとの目盛り線 */
   content: ""; position: absolute; inset: -3px 0; pointer-events: none; z-index: 1;
@@ -275,7 +291,7 @@ button { font: inherit; color: inherit; }
 .col.is-selected { background: var(--surface); }
 .bar { width: 100%; max-width: 22px; display: flex; flex-direction: column; justify-content: flex-end; border-radius: 11px 11px 0 0; overflow: hidden; }
 .bar-sleep, .bar-solid { background: var(--sleep); }
-.bar-pc { background: var(--pc); }
+.bar-pc { background: var(--pc); box-shadow: inset 0 0 0 1px var(--pc-edge); }
 .bar-soft { flex: none; }
 .bar-solid { flex: 1 1 auto; }
 .none-mark { width: 6px; height: 2px; background: var(--axis); margin-bottom: 4px; }
@@ -326,9 +342,10 @@ th { color: var(--ink-2); font-weight: 700; font-size: 12px; }
     color-scheme: light;
     --page: #fff; --surface: #fff; --ink: #000; --ink-2: #333; --muted: #666; --grid: #ddd; --axis: #999;
     --track: #eee; --wash: transparent; --sleep: #3b3f9e; --sleep-soft: #c4c6ec; --sleep-hatch: #3b3f9e; --pc: #e08a1e;
+    --pc-edge: #9a5608; --stage-deep: #262a73; --stage-rem: #5a5fc4; --stage-light: #a9acea; --warn: #c23a60; --warn-ink: #fff;
   }
   * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
-  .gate, .nav, #lock, .seg, .tip, summary { display: none !important; }
+  .gate, .nav, #lock, .seg, .tip, .jump, summary { display: none !important; }
   .day, .block { break-inside: avoid; }
   .day { border: 1px solid #bbb; }
   #app { max-width: none; padding: 0; }

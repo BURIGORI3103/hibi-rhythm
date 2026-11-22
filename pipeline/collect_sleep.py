@@ -144,7 +144,8 @@ def parse_sessions(pages, days=None):
     result, unreadable = [], 0
     for page in pages:
         props = page["properties"]
-        require_columns(props, SESSION_COLUMNS, "睡眠セッション")
+        # 期間の判定に使う開始・終了だけを先に確かめ、判定列は期間内の行でだけ確かめる
+        require_columns(props, {name: SESSION_COLUMNS[name] for name in ("開始日時", "終了日時")}, "睡眠セッション")
         start, end = text(props.get("開始日時")), text(props.get("終了日時"))
         if not start or not end:
             continue
@@ -158,6 +159,7 @@ def parse_sessions(pages, days=None):
             continue
         if period and (b <= period[0] or a >= period[1]):
             continue
+        require_columns(props, SESSION_COLUMNS, "睡眠セッション")
         result.append({"start": start, "end": end, "verdict": select(props.get("判定"))})
     return sorted(result, key=lambda item: parse_time(item["start"])), unreadable
 

@@ -7,7 +7,7 @@
   const THEME_KEY = 'hibi-rhythm-theme';
   const DOW = ['日', '月', '火', '水', '木', '金', '土'];
   const BLANK = '—';   // 記録していない（判定できなかった）項目。理由は書かない
-  const state = { days: [], byDate: new Map(), index: 0, range: 14 };
+  const state = { days: [], byDate: new Map(), index: 0, range: 14, end: null };
 
   const $ = (id) => document.getElementById(id);
   function el(tag, cls, text) {
@@ -24,7 +24,9 @@
     const m = whole(min);
     return m >= 60 ? `${Math.floor(m / 60)}時間${m % 60}分` : `${m}分`;
   }
-  const hmShort = (min) => (min > 0 && min < 1 ? '1分未満' : hm(min));
+  // 0より大きく1分に満たない時間は、切り捨てて「0分」とせず「1分未満」と書く（日計・一覧・グラフ説明で共通）
+  const underMinute = (min) => min > 0 && min < 1;
+  const hmShort = (min) => (underMinute(min) ? '1分未満' : hm(min));
   function short(min) {
     const m = whole(min);
     return `${Math.floor(m / 60)}:${pad(m % 60)}`;
@@ -74,7 +76,8 @@
   const pcMinutes = (pc) => (pcKind(pc) ? pc.active / 60 : null);
   function pcText(pc, format) {
     const minutes = pcMinutes(pc);
-    return minutes == null ? BLANK : format(minutes);
+    if (minutes == null) return BLANK;
+    return underMinute(minutes) ? '1分未満' : format(minutes);
   }
   const pcMark = (pc) => (pcKind(pc) === 'caution' ? '参考値' : '');
   const segmentsOf = (part) => (part && Array.isArray(part.segments) ? part.segments : []);
@@ -170,6 +173,8 @@ ${clock(a)}〜${clock(b)}（${hm(b - a)}）`));
       const amount = isNum(active) ? `（うち稼働 ${hmShort(active)}）` : '';
       root.append(arc(60, a, b, 'arc arc-pc', `PC稼働
 ${clock(a)}〜${clock(b)}${amount}`));
+      // ライトテーマでは琥珀の帯と背景の差が小さいため、帯の内外に濃い輪郭を引く
+      root.append(arc(67, a, b, 'arc-pc-edge', ''), arc(53, a, b, 'arc-pc-edge', ''));
     }
     if (pcSegments.length) spoken.push(`PC稼働 ${pcSegments.length}区間`);
     root.setAttribute('aria-label', `0時から24時の文字盤。${spoken.join('、') || '記録された区間はありません'}`);
@@ -192,8 +197,8 @@ ${clock(a)}〜${clock(b)}${amount}`));
     sleepValue.replaceChildren();
     sleepValue.classList.toggle('is-unknown', !range);
     if (!range) {
-      sleepValue.textContent = BLANK;
-      sleepNote.replaceChildren(el('span', null, '記録はありません'));
+      sleepValue.textContent = BLANK;   // 記録しなかった項目は「—」だけ。理由や「記録なし」は書かない
+      sleepNote.replaceChildren();
     } else {
       if (range[0] === range[1]) sleepValue.append(durNode(range[1]));
       else sleepValue.append(durNode(range[0]), '〜', document.createElement('wbr'), durNode(range[1]));
@@ -208,14 +213,21 @@ ${clock(a)}〜${clock(b)}${amount}`));
     pcValue.classList.toggle('is-unknown', minutes == null);
     if (minutes == null) {
       pcValue.textContent = BLANK;
-      pcNote.replaceChildren(el('span', null, '記録はありません'));
+      pcNote.replaceChildren();
     } else {
-      pcValue.append(durNode(minutes));
+      if (underMinute(minutes)) pcValue.append('1', el('small', null, '分未満'));
+      else pcValue.append(durNode(minutes));
       pcNote.replaceChildren(el('span', null, '操作中と判定された時間'));
       if (rec.pc.state === 'caution') pcNote.append(badge('参考値', true));
     }
 
-    $('day-dial').replaceChildren(dial(rec));
+    const dialKey = el('p', 'dial-key');
+    const outer = el('span');
+    outer.append(el('span', 'key key-sleep'), '外側は睡眠');
+    const inner = el('span');
+    inner.append(el('span', 'key key-pc'), '内側はPC');
+    dialKey.append(outer, inner);
+    $('day-dial').replaceChildren(dial(rec), dialKey);
     renderDetail(rec);
   }
 
@@ -235,7 +247,7 @@ ${clock(a)}〜${clock(b)}${amount}`));
     if (sleep.night != null) fact(facts, '眠っていた時間', hm(sleep.night));
     if (rec.steps != null) fact(facts, '歩数', `${rec.steps.toLocaleString('ja-JP')}歩`);
     if (facts.children.length) sleepBox.append(facts);
-    else sleepBox.append(el('p', 'empty', '内訳の記録がありません'));
+    else sleepBox.append(el('p', 'empty', sleepRange(rec.sleep) ? '内訳の記録がありません' : BLANK));
     const stages = [['深い睡眠', 'stage-deep', sleep.deep], ['レム睡眠', 'stage-rem', sleep.rem], ['浅い睡眠', 'stage-light', sleep.light]]
       .filter((stage) => stage[2] != null && stage[2] > 0);
     if (stages.length) {
@@ -267,15 +279,28 @@ ${clock(a)}〜${clock(b)}${amount}`));
         const fill = el('span');
         fill.style.width = `${Math.max((app.seconds / pc.active) * 100, 0.5)}%`;
         bar.append(fill);
-        const time = app.seconds < 60 ? '1分未満' : hm(app.seconds / 60);
+        const time = hmShort(app.seconds / 60);
         row.append(el('span', 'app-name', appName(app.name)), el('span', 'app-time', time), bar);
         list.append(row);
       }
       pcBox.append(list);
       const rest = pc.apps_other || { count: 0, seconds: 0 };
-      if (rest.count) pcBox.append(el('p', 'empty', `ほか${rest.count}件（合計 ${rest.seconds < 60 ? '1分未満' : hm(rest.seconds / 60)}）`));
+      if (rest.count) pcBox.append(el('p', 'empty', `ほか${rest.count}件（合計 ${hmShort(rest.seconds / 60)}）`));
     } else {
-      pcBox.append(el('p', 'empty', 'アプリの記録がありません'));
+      pcBox.append(el('p', 'empty', pcKind(pc) ? 'アプリの記録がありません' : BLANK));
+    }
+    // 文字盤のPC区間は読み上げでは区間数しか伝わらないため、開始・終了・稼働時間をキーボードで開ける一覧にも出す
+    const pcSegments = pcKind(pc) ? segmentsOf(pc) : [];
+    if (pcSegments.length) {
+      const spans = el('details', 'spans');
+      spans.append(el('summary', null, `PC稼働の区間（${pcSegments.length}区間）`));
+      const list = el('ul');
+      for (const [a, b, active] of pcSegments) {
+        const amount = isNum(active) ? `　稼働 ${hmShort(active)}` : '';
+        list.append(el('li', null, `${clock(a)}〜${clock(b)}${amount}`));
+      }
+      spans.append(list);
+      pcBox.append(spans);
     }
     box.append(sleepBox, pcBox);
 
@@ -293,8 +318,10 @@ ${clock(a)}〜${clock(b)}${amount}`));
   }
 
   /* ---------- リズム表 ---------- */
+  // 期間の終点はビルド対象の最終日（データの end ＝ ビルドした日の前日）。直近に記録のない日が続いても
+  // 終点を前へずらさず、その日は「—」と表示する。end を持たない古いデータだけ、最後の記録の日を使う。
   function latestDate() {
-    return state.days[state.days.length - 1].date;
+    return state.end || state.days[state.days.length - 1].date;
   }
   function renderRhythm() {
     const box = $('rhythm');
@@ -404,7 +431,7 @@ ${clock(a)}〜${clock(b)}${amount}`));
     const sleepTips = dates.map((date, i) => `${dayLabel(date)}\n睡眠 ${recs[i] ? sleepText(recs[i].sleep, hm) : BLANK}`);
 
     const knownPc = pcs.filter((value) => value != null);
-    const pcAvg = knownPc.length ? `平均 ${hm(average(knownPc))}（記録のある${knownPc.length}日）` : '記録のある日がありません';
+    const pcAvg = knownPc.length ? `平均 ${hmShort(average(knownPc))}（記録のある${knownPc.length}日）` : '記録のある日がありません';
     const pcBars = pcs.map((value) => {
       if (value == null) return null;
       const bar = el('span', 'bar bar-pc');
@@ -454,8 +481,24 @@ ${clock(a)}〜${clock(b)}${amount}`));
       button.setAttribute('aria-pressed', String(Number(button.dataset.range) === state.range));
     });
   }
+  // リズム表・推移で日を選んでも画面は動かさず（比較中の位置を保つ）、選んだ行のそばに詳細への近道を出す
+  function showJump(target) {
+    document.querySelectorAll('.jump').forEach((node) => node.remove());
+    const anchor = target && (target.classList.contains('row') ? target : target.closest('.chart'));
+    if (!anchor) return;
+    const jump = el('button', 'jump', 'この日の詳細を見る ↑');
+    jump.type = 'button';
+    jump.addEventListener('click', () => {
+      jump.remove();
+      const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      document.querySelector('.day').scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+      $('day-title').focus({ preventScroll: true });
+    });
+    anchor.after(jump);
+  }
   function select(date) {
     const index = state.days.findIndex((rec) => rec.date === date);
+    showJump(null);
     if (index < 0 || index === state.index) return;
     state.index = index;
     renderDay();
@@ -529,7 +572,11 @@ ${clock(a)}〜${clock(b)}${amount}`));
     }
     state.byDate = new Map(state.days.map((rec) => [rec.date, rec]));
     state.index = state.days.length - 1;
+    $('day-title').tabIndex = -1;   // 「この日の詳細を見る」から移動したときの読み上げ位置
     const stamp = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(dataset.generated_at || '');
+    const last = state.days[state.days.length - 1].date;
+    const end = /^\d{4}-\d{2}-\d{2}$/.test(dataset.end || '') ? dataset.end : null;
+    state.end = end && end > last ? end : last;
     $('updated').textContent = stamp ? `最終更新 ${stamp[1]}/${stamp[2]}/${stamp[3]} ${stamp[4]}:${stamp[5]}` : '';
     $('sample-banner').hidden = !dataset.sample;
     $('gate').hidden = true;
@@ -639,7 +686,9 @@ ${clock(a)}〜${clock(b)}${amount}`));
   for (const id of ['rhythm', 'trend']) {
     $(id).addEventListener('click', (event) => {
       const target = event.target.closest('[data-date]');
-      if (target) select(target.dataset.date);
+      if (!target) return;
+      select(target.dataset.date);
+      showJump(target);
     });
   }
   window.addEventListener('beforeprint', () => {

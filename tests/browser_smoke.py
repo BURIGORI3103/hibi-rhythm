@@ -37,7 +37,17 @@ def main():
                   "window_seconds": 9000, "window_unknown_seconds": 1800, "longest_not_afk_seconds": 7200,
                   "long_not_afk": False, "hours": [0] * 9 + [3600, 3600] + [0] * 13,
                   "spans": [[32400, 39600]], "apps": [{"name": "synthetic.exe", "seconds": 7200}]}
-        days[-1] = build_record(today - timedelta(days=1), source, None, [])
+        # 直近3日は記録がない（期間の終点は記録の最終日ではなく、ビルド対象の最終日＝前日のまま）
+        last = today - timedelta(days=4)
+        days = [record for record in days if record["date"] < last.isoformat()]
+        # 6日前：PCを30秒だけ使った日（「0分」ではなく「1分未満」と出す）
+        brief = dict(source, active_seconds=30, not_afk_seconds=30, longest_not_afk_seconds=30,
+                     hours=[0] * 24, spans=[[3600, 3630]], apps=[{"name": "synthetic.exe", "seconds": 30}])
+        brief_day = (today - timedelta(days=6)).isoformat()
+        days = [record for record in days if record["date"] != brief_day]
+        days.append(build_record(date.fromisoformat(brief_day), brief, None, []))
+        days.append(build_record(last, source, None, []))
+        days.sort(key=lambda record: record["date"])
         with patch.object(build, "SAMPLE_DIST_DIR", sample_dist):
             build.write_dist(days, sample.PASSPHRASE, True, today)
         server = ThreadingHTTPServer(("127.0.0.1", 0), partial(QuietHandler, directory=sample_dist))

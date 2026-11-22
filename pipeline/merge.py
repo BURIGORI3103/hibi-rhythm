@@ -152,14 +152,21 @@ def refresh(record):
     """保存済みレコードを、いまの基準（判定できない値は記録しない）に合わせる。
 
     分からない睡眠・記録できなかったPC・旧版の欠測項目と注意書きを取り除く。睡眠もPCも残らない日は
-    None を返す（その日は記録しない）。数値そのものは変えない。形式の崩れは validate が止める。
+    None を返す（その日は記録しない）。数値そのものは変えない。
+
+    取り除く前に、その項目が旧版・現行どちらかの形式として正しいかを確かめる。壊れた値（負の秒数など）を
+    「記録できなかった」と取り違えて消すと、呼び出し元が原本ファイルまで削除してしまうため、ValueError で止める。
+    残す項目の形式の崩れは validate が止める。
     """
     if not isinstance(record, dict):
         return record
     record = dict(record)
+    day = record.get("date")
     sleep, pc = record.get("sleep"), record.get("pc")
     if isinstance(sleep, dict) and (sleep.get("state") in LEGACY_SLEEP_STATES
                                     or (sleep.get("state") in SLEEP_STATE_VALUES and sleep_range(sleep) is None)):
+        if sleep.get("state") in SLEEP_STATE_VALUES:   # 現行の状態で下限・上限が欠けた形。ほかの値は正しいこと
+            validate_sleep(day, sleep, require_range=False)
         del record["sleep"]
         record.pop("warnings", None)   # 注意書きはすべて睡眠についてのもの
     if isinstance(pc, dict) and pc.get("state") in LEGACY_PC_STATES:
@@ -169,6 +176,8 @@ def refresh(record):
         record["pc"] = pc
         if all(is_number(pc.get(key)) for key in PC_TOTALS):
             if not pc_recorded(pc):
+                # 記録できた時間が0秒なのか、値が壊れているのかを区別してから外す
+                validate_pc(day, {**pc, "state": "ok"}, require_recorded=False)
                 del record["pc"]
             elif pc["state"] == "partial":   # 旧版の「一部欠測」は、記録できた時間をそのまま値とする
                 pc["state"] = pc_state(pc)
@@ -242,8 +251,11 @@ def validate(record):
         validate_pc(day, record["pc"])
 
 
-def validate_sleep(day, sleep):
-    """記録する睡眠は、時間（下限と上限）が分かっているものだけ。"""
+def validate_sleep(day, sleep, require_range=True):
+    """記録する睡眠は、時間（下限と上限）が分かっているものだけ。
+
+    require_range=False は、保存済みの日から分からない睡眠を外す前に、ほかの値が壊れていないかを確かめる用途。
+    """
     require(isinstance(sleep, dict), day, "睡眠の形式が不正です")
     require(set(sleep) <= {"state", "segments", *SLEEP_NUMBERS, *SLEEP_TEXTS}, day, "睡眠の項目が想定と違います")
     require(sleep.get("state") in SLEEP_STATE_VALUES, day, f"睡眠の状態が不正です（{sleep.get('state')!r}）")
@@ -254,8 +266,9 @@ def validate_sleep(day, sleep):
     for key in SLEEP_TEXTS:
         require(sleep.get(key) is None or isinstance(sleep[key], str), day, f"睡眠の {key} が文字列ではありません")
     lower, upper = sleep.get("lower"), sleep.get("upper")
-    require(lower is not None and upper is not None, day, "睡眠の下限か上限がありません（分からない睡眠は記録しません）")
-    require(lower <= upper, day, f"睡眠の下限（{lower}）が上限（{upper}）を超えています")
+    if require_range:
+        require(lower is not None and upper is not None, day, "睡眠の下限か上限がありません（分からない睡眠は記録しません）")
+    require(lower is None or upper is None or lower <= upper, day, f"睡眠の下限（{lower}）が上限（{upper}）を超えています")
     require(isinstance(sleep.get("segments"), list), day, "睡眠区間の形式が不正です")
     previous = 0
     for segment in sleep["segments"]:
@@ -265,8 +278,11 @@ def validate_sleep(day, sleep):
         previous = segment[1]
 
 
-def validate_pc(day, pc):
-    """記録するPCは、ActivityWatch が記録できた時間だけ。記録できなかった時間の項目は持たない。"""
+def validate_pc(day, pc, require_recorded=True):
+    """記録するPCは、ActivityWatch が記録できた時間だけ。記録できなかった時間の項目は持たない。
+
+    require_recorded=False は、保存済みの日から記録できた時間のないPCを外す前に、形式を確かめる用途。
+    """
     require(isinstance(pc, dict), day, "PCの形式が不正です")
     require(pc.get("state") in PC_STATE_VALUES, day, f"PCの状態が不正です（{pc.get('state')!r}）")
     require(set(pc) == PC_KEYS, day, "PCの項目が想定と違います")
@@ -275,7 +291,7 @@ def validate_pc(day, pc):
         limit = 86400 + 2 * LONG_NOT_AFK_SECONDS if name == "longest_not_afk" else 86400
         require(is_number(pc[name]) and 0 <= pc[name] <= limit, day, f"PCの{name}が0〜{limit}秒の範囲外です（{pc[name]!r}）")
     require(pc["active"] <= pc["not_afk"] + 1, day, "PC稼働判定がnot-afk時間を超えています")
-    require(pc_recorded(pc), day, "記録できた時間のないPCレコードです")
+    require(not require_recorded or pc_recorded(pc), day, "記録できた時間のないPCレコードです")
     require(isinstance(pc["hours"], list) and len(pc["hours"]) == 24
             and all(is_number(value) and 0 <= value <= 3601 for value in pc["hours"]), day, "PCの時間帯別の値が不正です")
     apps, other = pc["apps"], pc["apps_other"]
