@@ -656,7 +656,8 @@ class UnknownValueTests(unittest.TestCase):
                            "pc": {**legacy_pc, "state": "ok"}, "warnings": ["睡眠区間の合計が一致しません"]})
         self.assertEqual(set(pc_only), {"date", "pc"})
         nothing = refresh({"date": "2026-11-10", "sleep": {"state": "unsynced", "segments": []},
-                           "pc": {"state": "none", "segments": [], "active": 0}, "steps": 300})
+                           "pc": {**legacy_pc, "state": "none", "active": 0, "not_afk": 0, "afk": 0, "unknown": 86400},
+                           "steps": 300})
         self.assertIsNone(nothing)
 
     def test_merged_gap_is_not_counted_as_active_time(self):
@@ -862,6 +863,16 @@ class ReviewRegressionTests(unittest.TestCase):
         self.assertIsNone(refresh(legacy_empty))   # 正しい形式で0秒の日は従来どおり記録しない
         with self.assertRaises(ValueError):
             refresh({"date": DAY.isoformat(), "sleep": {"state": "confirmed", "segments": [], "lower": -5}})
+        # 旧版の欠測ラベルでも、外す前に値を確かめる（負の睡眠時間・壊れたPC・値の入った未取得）
+        legacy_pc = {**build_record(DAY, pc(), None, [])["pc"], "unknown": 86400}
+        for broken in ({"sleep": {"state": "none", "segments": [], "lower": -5}},
+                       {"sleep": {"state": "unsynced", "segments": [], "in_bed": -30}},
+                       {"pc": {**legacy_pc, "state": "none", "active": 0, "not_afk": -60, "afk": 0}},
+                       {"pc": {**legacy_pc, "state": "none", "unknown": -1}},
+                       {"pc": {"state": "missing", "segments": [], "active": -60}},
+                       {"pc": {"state": "none", "segments": []}}):
+            with self.subTest(broken=broken), self.assertRaises(ValueError):
+                refresh({"date": DAY.isoformat(), **broken})
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder) / "days"
             root.mkdir()

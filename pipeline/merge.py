@@ -165,11 +165,13 @@ def refresh(record):
     sleep, pc = record.get("sleep"), record.get("pc")
     if isinstance(sleep, dict) and (sleep.get("state") in LEGACY_SLEEP_STATES
                                     or (sleep.get("state") in SLEEP_STATE_VALUES and sleep_range(sleep) is None)):
-        if sleep.get("state") in SLEEP_STATE_VALUES:   # 現行の状態で下限・上限が欠けた形。ほかの値は正しいこと
-            validate_sleep(day, sleep, require_range=False)
+        # 旧版の欠測ラベルも現行の状態で下限・上限が欠けた形も、外す前にほかの値が正しいことを確かめる
+        checked = sleep if sleep.get("state") in SLEEP_STATE_VALUES else {**sleep, "state": "confirmed"}
+        validate_sleep(day, checked, require_range=False)
         del record["sleep"]
         record.pop("warnings", None)   # 注意書きはすべて睡眠についてのもの
     if isinstance(pc, dict) and pc.get("state") in LEGACY_PC_STATES:
+        validate_legacy_pc(day, pc)   # 壊れた値を欠測と取り違えて消さない
         del record["pc"]
     elif isinstance(pc, dict) and pc.get("state") in (*PC_STATE_VALUES, "partial"):
         pc = {key: value for key, value in pc.items() if key not in LEGACY_PC_KEYS}
@@ -310,6 +312,20 @@ def validate_pc(day, pc, require_recorded=True):
         require(len(segment) == 2 or 0 <= segment[2] <= segment[1] - segment[0] + 0.2, day,
                 f"PC区間の稼働分が区間の長さを超えています（{segment!r}）")
         previous = segment[1]
+
+
+def validate_legacy_pc(day, pc):
+    """旧版の「未取得」「記録なし」のPCが、旧版の形式として正しいかを確かめる（外す前の確認用）。"""
+    if pc.get("state") == "missing":   # 旧版の未取得は値を持たない
+        require(pc == {"state": "missing", "segments": []}, day, "旧版の未取得のPCレコードに値が入っています")
+        return
+    require(set(pc) - set(LEGACY_PC_KEYS) == PC_KEYS and "unknown" in pc, day, "旧版のPCの項目が想定と違います")
+    unknown, window_unknown = pc["unknown"], pc.get("window_unknown", 0)
+    require(is_number(unknown) and 0 <= unknown <= 86400, day, f"旧版のPCのunknownが0〜86400秒の範囲外です（{unknown!r}）")
+    require(is_number(window_unknown) and 0 <= window_unknown <= unknown + 1,
+            day, "旧版のPCのウィンドウ記録と重なるAFK欠測秒数が不正です")
+    rest = {key: value for key, value in pc.items() if key not in LEGACY_PC_KEYS}
+    validate_pc(day, {**rest, "state": "ok"}, require_recorded=False)
 
 
 def validate_dataset(records, today, start=None):
